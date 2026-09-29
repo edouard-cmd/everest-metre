@@ -94,6 +94,11 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
   .panel { width: auto; border-left: 0; border-top: 1px solid var(--rule); padding-inline: 16px; overflow: visible; }
 }
 @media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+[hidden] { display: none !important; }
+.lin { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px; align-items: center; margin: 8px 0 0; font-variant-numeric: tabular-nums; }
+.lin i { width: 22px; height: 5px; border-radius: 3px; display: block; }
+.lin span { font-size: 14px; }
+.lin b { font: 600 15px var(--font-data); text-align: right; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/proj4@2.12.1/dist/proj4.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/laz-perf@0.0.7/lib/web/laz-perf.js"></script>
@@ -740,6 +745,276 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
     return { hull, ratio: aire ? ringArea(hull.concat([hull[0]])) / aire : Infinity };
   }
 
+  /**
+   * Maquette propre du toit : un polygone plat par pan, bordé par les vraies
+   * arêtes (intersections de plans) et par le contour du bâtiment.
+   *
+   * Méthode « plans d'abord » : le partage des mailles entre pans (issu des
+   * points) dit QUI occupe QUOI ; les plans disent OÙ passent les arêtes.
+   * On trace le contour de chaque pan sur la grille, on le simplifie, puis on
+   * cale chaque sommet : sur l'arête entre deux pans (intersection de leurs
+   * plans), sur le point de rencontre de trois pans, ou sur le contour du
+   * bâtiment. Les arêtes se typent ensuite toutes seules :
+   * convexe + horizontale = faîtage, convexe + pentue = arêtier, concave = noue ;
+   * sur le contour : horizontale = égout, pentue = rive.
+   */
+  function modeleToit(res, geom) {
+    const cs = res.maille;
+    const polys = toPolygons(geom);
+    const pans = res.pans;
+    const PL = pans.map((p) => {
+      const [nx, ny, nz] = p.plane.n, [cx, cy, cz] = p.plane.c;
+      return { a: -nx / nz, b: -ny / nz, c: cz + (nx * cx + ny * cy) / nz };
+    });
+    const zOf = (k, x, y) => PL[k].a * x + PL[k].b * y + PL[k].c;
+    const segs = [];
+    for (const rings of polys) for (const r of rings) for (let i = 1; i < r.length; i++) segs.push([r[i - 1], r[i]]);
+
+    // Grille des étiquettes (indices globaux : maille gx couvre [gx*cs, (gx+1)*cs]).
+    const lab = new Map();
+    const K = (i, j) => i + ',' + j;
+    pans.forEach((p, k) => { for (const [x, y] of p.cells) lab.set(K(Math.floor(x / cs), Math.floor(y / cs)), k); });
+    // Mailles de l'emprise sans point : on les donne au pan voisin (pas de trou dans la maquette).
+    const bb = polygonsBounds(polys);
+    const vides = [];
+    for (let gx = Math.floor(bb.minX / cs); gx * cs <= bb.maxX; gx++) for (let gy = Math.floor(bb.minY / cs); gy * cs <= bb.maxY; gy++) {
+      if (lab.has(K(gx, gy))) continue;
+      if (inPolygons((gx + 0.5) * cs, (gy + 0.5) * cs, polys)) vides.push([gx, gy]);
+    }
+    for (let pass = 0; pass < 60 && vides.length; pass++) {
+      const reste = [];
+      const ajouts = [];
+      for (const [gx, gy] of vides) {
+        let v;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { v = lab.get(K(gx + dx, gy + dy)); if (v !== undefined) break; }
+        if (v !== undefined) ajouts.push([gx, gy, v]); else reste.push([gx, gy]);
+      }
+      for (const [gx, gy, v] of ajouts) lab.set(K(gx, gy), v);
+      vides.length = 0; vides.push(...reste);
+    }
+    const at = (gx, gy) => { const v = lab.get(K(gx, gy)); return v === undefined ? -1 : v; };
+
+    // Contour extérieur d'un pan sur la grille (arêtes de mailles, sens trigonométrique).
+    function contour(k) {
+      const next = new Map();
+      for (const [kk, v] of lab) {
+        if (v !== k) continue;
+        const [i, j] = kk.split(',').map(Number);
+        const add = (a, b) => { const s = K(a[0], a[1]); if (!next.has(s)) next.set(s, []); next.get(s).push(b); };
+        if (at(i, j - 1) !== k) add([i, j], [i + 1, j]);
+        if (at(i + 1, j) !== k) add([i + 1, j], [i + 1, j + 1]);
+        if (at(i, j + 1) !== k) add([i + 1, j + 1], [i, j + 1]);
+        if (at(i - 1, j) !== k) add([i, j + 1], [i, j]);
+      }
+      let best = [];
+      const vus = new Set();
+      for (const s0 of next.keys()) {
+        if (vus.has(s0)) continue;
+        const loop = [];
+        let s = s0, garde = 0;
+        while (garde++ < 100000) {
+          vus.add(s);
+          const [i, j] = s.split(',').map(Number);
+          loop.push([i, j]);
+          const outs = next.get(s);
+          if (!outs || !outs.length) break;
+          const n = outs.shift();
+          s = K(n[0], n[1]);
+          if (s === s0) break;
+        }
+        if (loop.length > best.length) best = loop;
+      }
+      return best.map(([i, j]) => [i * cs, j * cs]);
+    }
+
+    function dp(pts, tol) {
+      if (pts.length < 3) return pts.slice();
+      const [a, b] = [pts[0], pts[pts.length - 1]];
+      let im = -1, dm = 0;
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1e-9;
+      for (let i = 1; i < pts.length - 1; i++) {
+        const d = Math.abs((b[0] - a[0]) * (a[1] - pts[i][1]) - (a[0] - pts[i][0]) * (b[1] - a[1])) / L;
+        if (d > dm) { dm = d; im = i; }
+      }
+      if (dm <= tol) return [a, b];
+      const g = dp(pts.slice(0, im + 1), tol), d2 = dp(pts.slice(im), tol);
+      return g.slice(0, -1).concat(d2);
+    }
+    function simplifier(loop, tol) {
+      if (loop.length < 4) return loop;
+      // coupe la boucle au point le plus éloigné du premier
+      let im = 0, dm = 0;
+      for (let i = 1; i < loop.length; i++) { const d = Math.hypot(loop[i][0] - loop[0][0], loop[i][1] - loop[0][1]); if (d > dm) { dm = d; im = i; } }
+      const a = dp(loop.slice(0, im + 1), tol), b = dp(loop.slice(im).concat([loop[0]]), tol);
+      return a.slice(0, -1).concat(b.slice(0, -1));
+    }
+
+    const ligne = (k, o) => ({ A: PL[k].a - PL[o].a, B: PL[k].b - PL[o].b, C: PL[k].c - PL[o].c });
+    const projLigne = (p, L) => { const f = (L.A * p[0] + L.B * p[1] + L.C) / (L.A * L.A + L.B * L.B || 1e-12); return [p[0] - f * L.A, p[1] - f * L.B]; };
+    const projSeg = (p) => {
+      let best = null, bd = Infinity;
+      for (const [a, b] of segs) {
+        const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1e-12;
+        const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2));
+        const q = [a[0] + t * dx, a[1] + t * dy], d = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        if (d < bd) { bd = d; best = { q, a, b }; }
+      }
+      return best;
+    };
+    const interLigneSeg = (L, s) => {
+      const [a, b] = [s.a, s.b], fa = L.A * a[0] + L.B * a[1] + L.C, fb = L.A * b[0] + L.B * b[1] + L.C;
+      if (Math.abs(fa - fb) < 1e-12) return null;
+      const t = fa / (fa - fb);
+      if (t < -0.25 || t > 1.25) return null;
+      return [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+    };
+    const inter3 = (k, o, q) => {
+      const L1 = ligne(k, o), L2 = ligne(k, q), det = L1.A * L2.B - L2.A * L1.B;
+      if (Math.abs(det) < 1e-9) return null;
+      return [(-L1.C * L2.B + L2.C * L1.B) / det, (-L1.A * L2.C + L2.A * L1.C) / det];
+    };
+
+    // Points où trois pans se rencontrent (bout de faîtage, pied de noue…) :
+    // repérés sur la grille, placés exactement à l'intersection des trois plans.
+    const triples = [];
+    {
+      const vus = new Set();
+      for (const kk of lab.keys()) {
+        const [i, j] = kk.split(',').map(Number);
+        const s3 = new Set([at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1), at(i + 2, j), at(i, j + 2), at(i + 2, j + 1), at(i + 1, j + 2), at(i + 2, j + 2)]);
+        const ls = [...s3].filter((l) => l >= 0).sort((x, y) => x - y);
+        if (ls.length !== 3) continue;
+        const cle = ls.join('-');
+        if (vus.has(cle)) continue;
+        vus.add(cle);
+        const x = inter3(ls[0], ls[1], ls[2]);
+        const ref = [(i + 1.5) * cs, (j + 1.5) * cs];
+        if (x && Math.hypot(x[0] - ref[0], x[1] - ref[1]) < 2.5) triples.push({ ls, p: x });
+      }
+    }
+    const caleTriple = (k, w) => {
+      let best = null, bd = 1.2;
+      for (const T of triples) {
+        if (!T.ls.includes(k)) continue;
+        const d = Math.hypot(T.p[0] - w[0], T.p[1] - w[1]);
+        if (d < bd) { bd = d; best = T.p; }
+      }
+      return best || w;
+    };
+
+    const faces = [], lignes = [];
+    pans.forEach((p, k) => {
+      const brut = contour(k);
+      if (brut.length < 4) return;
+      const simp = simplifier(brut, 0.45);
+      const pts = [];
+      for (const v of simp) {
+        // étiquettes autour du sommet (rayon 2 mailles)
+        const gi = Math.round(v[0] / cs), gj = Math.round(v[1] / cs), cnt = new Map();
+        for (let di = -2; di < 2; di++) for (let dj = -2; dj < 2; dj++) { const l = at(gi + di, gj + dj); cnt.set(l, (cnt.get(l) || 0) + 1); }
+        const autres = [...cnt.entries()].filter(([l]) => l !== k && l >= 0).sort((a, b) => b[1] - a[1]).map(([l]) => l);
+        const dehors = cnt.has(-1);
+        let w = v;
+        if (autres.length >= 2) {
+          const x = inter3(k, autres[0], autres[1]);
+          w = x && Math.hypot(x[0] - v[0], x[1] - v[1]) < 1.5 ? x : projLigne(v, ligne(k, autres[0]));
+        } else if (autres.length === 1 && dehors) {
+          const s = projSeg(v), x = s && interLigneSeg(ligne(k, autres[0]), s);
+          w = x && Math.hypot(x[0] - v[0], x[1] - v[1]) < 1.5 ? x : (s ? s.q : v);
+        } else if (autres.length === 1) {
+          const x = projLigne(v, ligne(k, autres[0]));
+          w = Math.hypot(x[0] - v[0], x[1] - v[1]) < 1.5 ? x : v;
+        } else if (dehors) {
+          const s = projSeg(v); if (s && Math.hypot(s.q[0] - v[0], s.q[1] - v[1]) < 1.0) w = s.q;
+        }
+        w = caleTriple(k, w);
+        const last = pts[pts.length - 1];
+        if (!last || Math.hypot(w[0] - last[0], w[1] - last[1]) > 0.1) pts.push(w);
+      }
+      while (pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 0.1) pts.pop();
+      if (pts.length < 3) return;
+      const p3 = pts.map(([x, y]) => [x, y, zOf(k, x, y)]);
+      faces.push({ pan: k, pts: p3 });
+
+      for (let i = 0; i < p3.length; i++) {
+        const a = p3[i], b = p3[(i + 1) % p3.length];
+        const dx = b[0] - a[0], dy = b[1] - a[1], l2 = Math.hypot(dx, dy);
+        if (l2 < 0.3) continue;
+        // de l'autre côté de l'arête (contour trigonométrique : l'extérieur est à droite)
+        const mx = (a[0] + b[0]) / 2 + (dy / l2) * 0.35, my = (a[1] + b[1]) / 2 - (dx / l2) * 0.35;
+        const o = at(Math.floor(mx / cs), Math.floor(my / cs));
+        const long = Math.hypot(l2, b[2] - a[2]);
+        const horizontale = Math.abs(b[2] - a[2]) / l2 < Math.tan((8 * Math.PI) / 180);
+        let type, paire = null;
+        if (o >= 0 && o !== k) {
+          const ix = (a[0] + b[0]) / 2 - (dy / l2) * 0.5, iy = (a[1] + b[1]) / 2 + (dx / l2) * 0.5;
+          const convexe = zOf(k, ix, iy) < zOf(o, ix, iy);
+          type = convexe ? (horizontale ? 'faitage' : 'arretier') : 'noue';
+          paire = Math.min(k, o) + '-' + Math.max(k, o);
+        } else type = horizontale ? 'egout' : 'rive';
+        lignes.push({ type, a, b, long, paire, pan: k });
+      }
+    });
+
+    // Une arête intérieure est vue par ses deux pans, parfois en plusieurs tronçons :
+    // pour chaque paire de pans, on projette tous les tronçons sur leur droite
+    // commune et on garde la réunion des intervalles (ni doublon, ni trou).
+    const groupes = new Map(), aretes = [];
+    for (const l of lignes) {
+      if (!l.paire) { aretes.push(l); continue; }
+      const kk = l.paire + ':' + l.type;
+      if (!groupes.has(kk)) groupes.set(kk, []);
+      groupes.get(kk).push(l);
+    }
+    for (const arr of groupes.values()) {
+      const ref = arr.reduce((u, v) => (v.long > u.long ? v : u));
+      const o = ref.a, d = [ref.b[0] - o[0], ref.b[1] - o[1], ref.b[2] - o[2]];
+      const n2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] || 1e-12;
+      const t = (q) => ((q[0] - o[0]) * d[0] + (q[1] - o[1]) * d[1] + (q[2] - o[2]) * d[2]) / n2;
+      const iv = arr.map((l) => { const u = t(l.a), v = t(l.b); return [Math.min(u, v), Math.max(u, v)]; }).sort((x, y) => x[0] - y[0]);
+      const unis = [];
+      for (const [u, v] of iv) {
+        const last = unis[unis.length - 1];
+        if (last && u <= last[1] + 0.15 / Math.sqrt(n2)) last[1] = Math.max(last[1], v); else unis.push([u, v]);
+      }
+      const at3 = (tt) => [o[0] + tt * d[0], o[1] + tt * d[1], o[2] + tt * d[2]];
+      for (const [u, v] of unis) {
+        const a = at3(u), b = at3(v);
+        aretes.push({ type: ref.type, a, b, long: Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]), paire: ref.paire, pan: ref.pan });
+      }
+    }
+
+    // Une même arête peut sortir en plusieurs tronçons alignés : on les recolle
+    // (un faîtage de 12 m se lit d'un seul tenant, pas en 3 + 1,5 + 7,5).
+    let fusion = true;
+    while (fusion) {
+      fusion = false;
+      boucle: for (let i = 0; i < aretes.length; i++) for (let j = i + 1; j < aretes.length; j++) {
+        const e = aretes[i], f = aretes[j];
+        if (e.type !== f.type) continue;
+        const pairs = [[e.a, e.b, f.a, f.b], [e.a, e.b, f.b, f.a], [e.b, e.a, f.a, f.b], [e.b, e.a, f.b, f.a]];
+        for (const [p0, p1, q0, q1] of pairs) {
+          // p1 == q0 : tronçons bout à bout
+          if (Math.hypot(p1[0] - q0[0], p1[1] - q0[1], p1[2] - q0[2]) > 0.2) continue;
+          const u = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]], v = [q1[0] - q0[0], q1[1] - q0[1], q1[2] - q0[2]];
+          const nu = Math.hypot(...u), nv = Math.hypot(...v);
+          if (!nu || !nv) continue;
+          const cos = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (nu * nv);
+          if (cos < Math.cos((8 * Math.PI) / 180)) continue;
+          aretes[i] = { type: e.type, a: p0, b: q1, long: Math.hypot(q1[0] - p0[0], q1[1] - p0[1], q1[2] - p0[2]), paire: e.paire, pan: e.pan };
+          aretes.splice(j, 1);
+          fusion = true;
+          break boucle;
+        }
+      }
+    }
+
+    const lineaires = { faitage: 0, arretier: 0, noue: 0, egout: 0, rive: 0 };
+    for (const e of aretes) lineaires[e.type] += e.long;
+    const aireFaces = faces.reduce((s, f) => s + ringArea(f.pts.map((q) => [q[0], q[1]])), 0);
+    return { faces, aretes, lineaires, couverture: aireFaces / Math.max(res.emprise, 1) };
+  }
+
   const CARDINAUX = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
   function cardinal(az) {
     return CARDINAUX[Math.round((((az % 360) + 360) % 360) / 45) % 8];
@@ -806,7 +1081,7 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
   root.EV3 = {
     parseHeader, parseHierarchyPage, keyBoundsXY, loadCopcBox,
     toPolygons, inPolygons, polygonsArea, polygonsBounds,
-    fitPlane, planeZ, analyseRoof, recalerEmprise, panOutline, cardinal, median, quantile, DEFAULTS,
+    fitPlane, planeZ, analyseRoof, recalerEmprise, panOutline, modeleToit, cardinal, median, quantile, DEFAULTS,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
@@ -819,7 +1094,7 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
       <div><strong>Le toit, point par point</strong>Saisissez une adresse : le relevé LiDAR HD de l'IGN s'affiche en 3D, avec chaque pan mesuré.</div>
     </div>
     <div class="scene-tools" id="tools" hidden>
-      <button class="chip" id="tPoints" aria-pressed="true">Points LiDAR</button>
+      <button class="chip" id="tPoints" aria-pressed="false">Points LiDAR</button>
       <button class="chip" id="tPans" aria-pressed="true">Pans</button>
       <button class="chip" id="tHaut" aria-pressed="false">Couleur hauteur</button>
       <button class="chip" id="tTop">Vue de dessus</button>
@@ -857,6 +1132,10 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         <div><dt>Hauteur à l'égout</dt><dd id="rEgout">—</dd></div>
         <div><dt>Hauteur au faîtage</dt><dd id="rFaitage">—</dd></div>
       </dl>
+      <div id="rLinBox" hidden>
+        <h2 style="margin-top:18px">Linéaires</h2>
+        <div class="lin" id="rLin"></div>
+      </div>
       <h2 style="margin-top:18px">Pan par pan</h2>
       <div style="overflow-x:auto">
         <table class="pans" id="rTable">
@@ -1199,6 +1478,90 @@ function drawPans() {
   layers.walls.add(new THREE.Mesh(wgeo, wallMat));
 }
 
+const LIGNES = {
+  faitage: { nom: 'Faîtage', coul: '#e63946' },
+  arretier: { nom: 'Arêtiers', coul: '#ff9f1c' },
+  noue: { nom: 'Noues', coul: '#3a86ff' },
+  egout: { nom: 'Égouts', coul: '#2ec4b6' },
+  rive: { nom: 'Rives', coul: '#f1f1f1' },
+};
+
+// Maquette propre : pans plats, murs pleins, arêtes typées et cotées.
+function drawModel() {
+  clear(layers.pans); clear(layers.walls);
+  const m = S.model, res = S.res;
+  // Pans
+  m.faces.forEach((f) => {
+    const k = f.pan, color = PAN_COLORS[k % PAN_COLORS.length];
+    const c2 = f.pts.map(([x, y]) => new THREE.Vector2(x, y));
+    let tris = [];
+    try { tris = THREE.ShapeUtils.triangulateShape(c2, []); } catch (e) { tris = []; }
+    const pos = [];
+    for (const t of tris) for (const i of t) pos.push(...W(f.pts[i][0], f.pts[i][1], f.pts[i][2]).toArray());
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.9, side: THREE.DoubleSide }));
+    mesh.userData.pan = k;
+    layers.pans.add(mesh);
+    let sx = 0, sy = 0, sz = 0;
+    for (const q of f.pts) { sx += q[0]; sy += q[1]; sz += q[2]; }
+    const n = f.pts.length, lb = label(String(k + 1), color, '#111');
+    lb.position.copy(W(sx / n, sy / n, sz / n + 0.5));
+    lb.scale.set(1, 1, 1);
+    layers.pans.add(lb);
+  });
+  // Arêtes : tubes colorés, sommets en points, longueurs affichées
+  const sommets = new Map();
+  for (const e of m.aretes) {
+    const a = W(...e.a), b = W(...e.b);
+    const dir = new THREE.Vector3().subVectors(b, a), len = dir.length();
+    if (len < 0.05) continue;
+    const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, len, 6), new THREE.MeshBasicMaterial({ color: LIGNES[e.type].coul }));
+    tube.position.copy(a).addScaledVector(dir, 0.5);
+    tube.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+    layers.pans.add(tube);
+    for (const p of [e.a, e.b]) sommets.set(p[0].toFixed(1) + ',' + p[1].toFixed(1), p);
+    if (e.long >= 1.5 && (e.type !== 'egout' || e.long >= 4)) {
+      const t = cote(fmt(e.long, 2) + ' m', LIGNES[e.type].coul);
+      const mid = W((e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2, (e.a[2] + e.b[2]) / 2 + 0.45);
+      t.position.copy(mid);
+      layers.pans.add(t);
+    }
+  }
+  const dot = new THREE.SphereGeometry(0.13, 10, 8), dotMat = new THREE.MeshBasicMaterial({ color: 0x2b59ff });
+  for (const p of sommets.values()) { const s = new THREE.Mesh(dot, dotMat); s.position.copy(W(...p)); layers.pans.add(s); }
+  // Murs : sous chaque égout et chaque rive, du sol jusqu'au bord du toit (les pignons se forment seuls)
+  const pos = [];
+  for (const e of m.aretes) {
+    if (e.type !== 'egout' && e.type !== 'rive') continue;
+    const a0 = W(e.a[0], e.a[1], res.zSol), b0 = W(e.b[0], e.b[1], res.zSol), a1 = W(...e.a), b1 = W(...e.b);
+    pos.push(...a0.toArray(), ...b0.toArray(), ...b1.toArray(), ...a0.toArray(), ...b1.toArray(), ...a1.toArray());
+  }
+  const wgeo = new THREE.BufferGeometry();
+  wgeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  wgeo.computeVertexNormals();
+  layers.walls.add(new THREE.Mesh(wgeo, new THREE.MeshLambertMaterial({ color: 0xe6d9c3, side: THREE.DoubleSide })));
+}
+
+// Étiquette de cote, lisible dans les deux sens de rotation
+function cote(text, coul) {
+  const cv = document.createElement('canvas');
+  cv.width = 256; cv.height = 72;
+  const g = cv.getContext('2d');
+  g.fillStyle = 'rgba(13,18,22,.88)';
+  g.beginPath(); g.roundRect(4, 4, 248, 64, 14); g.fill();
+  g.fillStyle = coul; g.fillRect(4, 58, 248, 10);
+  g.fillStyle = '#ffffff'; g.font = '700 42px "JetBrains Mono", monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 128, 32);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+  sp.renderOrder = 11;
+  sp.scale.set(1.9, 0.53, 1);
+  return sp;
+}
+
 function drawOutlines() {
   clear(layers.outlines);
   for (const b of S.bats) {
@@ -1285,7 +1648,14 @@ async function selectBuilding(bat, adresse, force = false) {
     S.polys = EV3.toPolygons(rec.geom);
     S.res = EV3.analyseRoof(S.load.P, rec.geom);
     if (!S.res.pans.length) throw new UserError("Aucun pan exploitable sur ce bâtiment (toit trop petit, masqué par la végétation, ou non classé par l'IGN).");
-    colorPoints(); drawPans(); drawOutlines(); applyToggles();
+    S.model = null;
+    try {
+      const m = EV3.modeleToit(S.res, rec.geom);
+      if (m.faces.length && m.couverture > 0.8 && m.couverture < 1.2) S.model = m;
+    } catch (e) { console.warn('maquette', e); }
+    colorPoints();
+    if (S.model) drawModel(); else drawPans();
+    drawOutlines(); applyToggles();
     if (force || !covered) frame();
     render();
     $('empty').hidden = true; $('tools').hidden = false; $('hint').hidden = false;
@@ -1321,6 +1691,13 @@ function render() {
     tb.appendChild(tr);
   });
   $('rTable').tFoot.innerHTML = `<tr><td>Total</td><td></td><td></td><td>${fmt(r.surfaceSolPans)}</td><td>${fmt(r.surfaceReelle)}</td></tr>`;
+  $('rLinBox').hidden = !S.model;
+  if (S.model) {
+    $('rLin').innerHTML = Object.entries(LIGNES).map(([k, d]) => {
+      const v = S.model.lineaires[k];
+      return `<i style="background:${d.coul};${k === 'rive' ? 'outline:1px solid var(--ink-soft)' : ''}"></i><span>${d.nom}</span><b>${v > 0.05 ? fmt(v, 2) + ' ml' : '—'}</b>`;
+    }).join('');
+  }
 
   const notes = [];
   const expl = r.pointsExpliques / Math.max(r.pointsToit, 1);
