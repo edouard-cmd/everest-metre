@@ -1,0 +1,1393 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Everest Métré 3D</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout : scène 3D plein cadre à gauche (en haut sur mobile), carnet de métré à droite. */
+:root {
+  --paper: #f3f4f1;        /* carnet */
+  --ink: #1d2327;
+  --ink-soft: #5b6670;
+  --rule: #d6dbd6;
+  --card: #ffffff;
+  --tape: #a02d05;         /* rouge Everest, comme l'appli de métré */
+  --tape-ink: #ffffff;
+  --warn: #b5541f;
+  --ok: #2f7d4f;
+  --scene: #1b2228;        /* ardoise, identique dans les deux thèmes */
+  --scene-2: #2a343c;
+  --font-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --font-body: "Barlow", system-ui, sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #161b1f; --ink: #e8ebe7; --ink-soft: #97a3ad; --rule: #2c353c; --card: #1e252a;
+    --tape: #d2542a; --tape-ink: #ffffff; --warn: #e88a52; --ok: #6cc28f; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #161b1f; --ink: #e8ebe7; --ink-soft: #97a3ad; --rule: #2c353c; --card: #1e252a;
+  --tape: #d2542a; --tape-ink: #ffffff; --warn: #e88a52; --ok: #6cc28f; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--paper); color: var(--ink); font: 15px/1.45 var(--font-body); }
+.app { display: flex; height: 100%; }
+.scene { position: relative; flex: 1; min-width: 0; background: radial-gradient(120% 90% at 30% 20%, var(--scene-2), var(--scene)); }
+.scene canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.scene-hint { position: absolute; left: 12px; bottom: 12px; right: 12px; color: #c9d2d8; font: 13px var(--font-body); pointer-events: none; text-shadow: 0 1px 2px #000a; }
+.scene-tools { position: absolute; top: 12px; right: 12px; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.chip { font: 600 13px var(--font-body); color: #e8ebe7; background: #0d1216cc; border: 1px solid #ffffff26; border-radius: 999px; padding: 6px 12px; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--tape); color: var(--tape-ink); border-color: var(--tape); }
+.chip:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--tape); outline-offset: 2px; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: #c9d2d8; text-align: center; }
+.empty strong { display: block; font: 600 28px/1.1 var(--font-display); color: #fff; letter-spacing: .01em; margin-bottom: 6px; }
+.panel { width: 380px; flex: none; overflow-y: auto; border-left: 1px solid var(--rule); padding-block: 18px 28px; padding-inline: 18px; display: flex; flex-direction: column; gap: 16px; }
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.brand h1 { margin: 0; font: 700 26px/1 var(--font-display); letter-spacing: .01em; }
+.brand span { font: 12px var(--font-data); color: var(--ink-soft); }
+.brand .back { margin-left: auto; font: 600 14px var(--font-body); color: var(--ink); text-decoration: none; border: 2px solid var(--ink); border-radius: 6px; padding: 6px 10px; }
+.search { position: relative; }
+.search label { display: block; font: 600 12px var(--font-body); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft); margin-bottom: 6px; }
+.search-row { display: flex; gap: 8px; }
+.search input { flex: 1; min-width: 0; font: 15px var(--font-body); color: var(--ink); background: var(--card); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; }
+.btn { font: 600 15px var(--font-body); background: var(--tape); color: var(--tape-ink); border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+.btn:disabled { opacity: .5; cursor: default; }
+.suggest { position: absolute; z-index: 5; left: 0; right: 0; top: 100%; margin: 4px 0 0; padding: 4px; list-style: none; background: var(--card); border: 1px solid var(--rule); border-radius: 8px; box-shadow: 0 8px 24px #0003; }
+.suggest li { padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+.suggest li:hover, .suggest li[aria-selected="true"] { background: var(--paper); }
+.status { font: 13px var(--font-body); color: var(--ink-soft); min-height: 1.4em; }
+.status.err { color: var(--warn); }
+.bar { height: 4px; background: var(--rule); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--tape); transition: width .2s; }
+.total { display: grid; gap: 2px; }
+.total .eyebrow { font: 600 12px var(--font-body); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft); }
+.total .big { font: 700 52px/1 var(--font-display); font-variant-numeric: tabular-nums; }
+.total .big small { font-size: 26px; font-weight: 600; margin-left: 4px; }
+.total .addr { font-size: 14px; color: var(--ink-soft); }
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; margin: 0; }
+.facts div { min-width: 0; }
+.facts dt { font: 12px var(--font-body); color: var(--ink-soft); }
+.facts dd { margin: 0; font: 600 17px var(--font-data); font-variant-numeric: tabular-nums; }
+h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
+.pans { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.pans th { text-align: right; font: 600 11px var(--font-body); text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); padding: 0 6px 6px; border-bottom: 1px solid var(--rule); }
+.pans th:first-child, .pans td:first-child { text-align: left; }
+.pans td { text-align: right; padding: 7px 6px; border-bottom: 1px solid var(--rule); font: 14px var(--font-data); }
+.pans tr { cursor: pointer; }
+.pans tbody tr:hover, .pans tbody tr.on { background: var(--card); }
+.pans tfoot td { font-weight: 600; border-bottom: 0; }
+.sw { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 5px; font: 600 12px var(--font-data); color: #111; }
+.notes { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; font-size: 13px; color: var(--ink-soft); }
+.notes li.warn { color: var(--warn); }
+.src { font-size: 12px; color: var(--ink-soft); border-top: 1px solid var(--rule); padding-top: 10px; }
+@media (max-width: 760px) {
+  .app { flex-direction: column; height: auto; min-height: 100%; }
+  .scene { flex: none; height: 58vh; min-height: 320px; }
+  .panel { width: auto; border-left: 0; border-top: 1px solid var(--rule); padding-inline: 16px; overflow: visible; }
+}
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/proj4@2.12.1/dist/proj4.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/laz-perf@0.0.7/lib/web/laz-perf.js"></script>
+<script>
+/*
+ * Everest Mètre 3D — moteur.
+ * Lecture COPC du LiDAR HD IGN + détection des pans de toiture dans les points.
+ *
+ * Lecture COPC inspirée de lidar-explorer (MIT, maximvs101) : en-tête LAS 1.4,
+ * VLR copc info, hiérarchie paginée, un chunk LAZ par nœud décodé par laz-perf.
+ *
+ * Tout calcul se fait en Lambert 93 (mètres). Fonctionne dans le navigateur et
+ * sous Node (pour les tests) : tout est exposé sur globalThis.EV3.
+ */
+(function (root) {
+  'use strict';
+
+  // ------------------------------------------------------------------------
+  // COPC
+  // ------------------------------------------------------------------------
+  const LAS_HEADER_SIZE = 375;
+  const VLR_HEADER_SIZE = 54;
+  const HEADER_PROBE = 2048;
+
+  function ascii(bytes, off, len) {
+    let s = '';
+    for (let i = 0; i < len; i++) {
+      const c = bytes[off + i];
+      if (c === 0) break;
+      s += String.fromCharCode(c);
+    }
+    return s;
+  }
+
+  function parseHeader(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (ascii(bytes, 0, 4) !== 'LASF') throw new Error('fichier non LAS');
+    const fmtRaw = dv.getUint8(104);
+    const h = {
+      pointFormat: fmtRaw & 0x3f,
+      pointLength: dv.getUint16(105, true),
+      scale: [dv.getFloat64(131, true), dv.getFloat64(139, true), dv.getFloat64(147, true)],
+      offset: [dv.getFloat64(155, true), dv.getFloat64(163, true), dv.getFloat64(171, true)],
+      // Piège LAS : max avant min, par axe.
+      bounds: {
+        maxX: dv.getFloat64(179, true), minX: dv.getFloat64(187, true),
+        maxY: dv.getFloat64(195, true), minY: dv.getFloat64(203, true),
+        maxZ: dv.getFloat64(211, true), minZ: dv.getFloat64(219, true),
+      },
+      pointCount: Number(dv.getBigUint64(247, true)),
+    };
+    const vlrUser = ascii(bytes, LAS_HEADER_SIZE + 2, 16);
+    const vlrId = dv.getUint16(LAS_HEADER_SIZE + 18, true);
+    if (vlrUser !== 'copc' || vlrId !== 1) throw new Error('fichier non COPC');
+    const d = LAS_HEADER_SIZE + VLR_HEADER_SIZE;
+    h.center = [dv.getFloat64(d, true), dv.getFloat64(d + 8, true), dv.getFloat64(d + 16, true)];
+    h.halfSize = dv.getFloat64(d + 24, true);
+    h.spacing = dv.getFloat64(d + 32, true);
+    h.rootHierOffset = Number(dv.getBigUint64(d + 40, true));
+    h.rootHierSize = Number(dv.getBigUint64(d + 48, true));
+    return h;
+  }
+
+  function parseHierarchyPage(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const nodes = [], pages = [];
+    for (let i = 0; i + 32 <= bytes.length; i += 32) {
+      const key = {
+        d: dv.getInt32(i, true), x: dv.getInt32(i + 4, true),
+        y: dv.getInt32(i + 8, true), z: dv.getInt32(i + 12, true),
+      };
+      const offset = Number(dv.getBigUint64(i + 16, true));
+      const byteSize = dv.getInt32(i + 24, true);
+      const pointCount = dv.getInt32(i + 28, true);
+      // -1 : ce n'est pas un nœud mais une sous-page de hiérarchie.
+      if (pointCount === -1) pages.push({ key, offset, byteSize });
+      else if (pointCount > 0) nodes.push({ key, offset, byteSize, pointCount });
+    }
+    return { nodes, pages };
+  }
+
+  function keyBoundsXY(h, key) {
+    const size = (2 * h.halfSize) / Math.pow(2, key.d);
+    const minX = h.center[0] - h.halfSize + key.x * size;
+    const minY = h.center[1] - h.halfSize + key.y * size;
+    return { minX, minY, maxX: minX + size, maxY: minY + size };
+  }
+
+  function intersects(a, b) {
+    return a.minX <= b.maxX && a.maxX >= b.minX && a.minY <= b.maxY && a.maxY >= b.minY;
+  }
+
+  async function pool(items, n, fn) {
+    let i = 0;
+    const workers = Array.from({ length: Math.min(n, items.length) }, async () => {
+      while (i < items.length) {
+        const k = i++;
+        await fn(items[k], k);
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  /**
+   * Charge tous les points d'une dalle COPC contenus dans `box` (L93, XY),
+   * à pleine densité (tous les niveaux de l'octree).
+   * fetchRange(url, start, endInclusive) -> Uint8Array
+   */
+  async function loadCopcBox(url, box, { fetchRange, lazPerf, onProgress } = {}) {
+    const head = await fetchRange(url, 0, HEADER_PROBE - 1);
+    const h = parseHeader(head);
+
+    // Hiérarchie : on ne descend que dans les sous-pages qui touchent l'emprise.
+    const nodes = [];
+    const queue = [{ key: { d: 0, x: 0, y: 0, z: 0 }, offset: h.rootHierOffset, byteSize: h.rootHierSize }];
+    while (queue.length) {
+      const batch = queue.splice(0, queue.length);
+      const pages = await Promise.all(
+        batch.map((p) => fetchRange(url, p.offset, p.offset + p.byteSize - 1)),
+      );
+      for (const bytes of pages) {
+        const { nodes: ns, pages: ps } = parseHierarchyPage(bytes);
+        for (const n of ns) if (intersects(keyBoundsXY(h, n.key), box)) nodes.push(n);
+        for (const p of ps) if (intersects(keyBoundsXY(h, p.key), box)) queue.push(p);
+      }
+    }
+
+    const totalBytes = nodes.reduce((s, n) => s + n.byteSize, 0);
+    let doneBytes = 0;
+    const chunks = [];
+    const L = lazPerf;
+    let pointPtr = 0, scratchPtr = 0, scratchSize = 0;
+
+    await pool(nodes, 4, async (node) => {
+      const bytes = await fetchRange(url, node.offset, node.offset + node.byteSize - 1);
+      // Décodage synchrone (le tas WASM n'est pas réentrant).
+      if (bytes.length > scratchSize) {
+        if (scratchPtr) L._free(scratchPtr);
+        scratchPtr = L._malloc(bytes.length);
+        scratchSize = bytes.length;
+      }
+      if (!pointPtr) pointPtr = L._malloc(h.pointLength);
+      L.HEAPU8.set(bytes, scratchPtr);
+      const dec = new L.ChunkDecoder();
+      dec.open(h.pointFormat, h.pointLength, scratchPtr);
+      const xs = [], ys = [], zs = [], cs = [];
+      const [sx, sy, sz] = h.scale;
+      const [ox, oy, oz] = h.offset;
+      try {
+        let heap = new DataView(L.HEAPU8.buffer);
+        for (let i = 0; i < node.pointCount; i++) {
+          dec.getPoint(pointPtr);
+          if (heap.buffer.byteLength === 0) heap = new DataView(L.HEAPU8.buffer);
+          const x = heap.getInt32(pointPtr, true) * sx + ox;
+          const y = heap.getInt32(pointPtr + 4, true) * sy + oy;
+          if (x < box.minX || x > box.maxX || y < box.minY || y > box.maxY) continue;
+          xs.push(x); ys.push(y);
+          zs.push(heap.getInt32(pointPtr + 8, true) * sz + oz);
+          // Formats 6 à 10 : classification sur l'octet 16 ; formats 0-5 : octet 15 (5 bits).
+          cs.push(h.pointFormat >= 6 ? heap.getUint8(pointPtr + 16) : heap.getUint8(pointPtr + 15) & 31);
+        }
+      } finally {
+        dec.delete();
+      }
+      chunks.push({ xs, ys, zs, cs });
+      doneBytes += node.byteSize;
+      if (onProgress) onProgress(doneBytes / totalBytes, nodes.length);
+    });
+
+    let n = 0;
+    for (const c of chunks) n += c.xs.length;
+    const out = {
+      x: new Float64Array(n), y: new Float64Array(n), z: new Float64Array(n),
+      cls: new Uint8Array(n), count: n, header: h, nodes: nodes.length, bytes: totalBytes,
+    };
+    let k = 0;
+    for (const c of chunks) {
+      for (let i = 0; i < c.xs.length; i++, k++) {
+        out.x[k] = c.xs[i]; out.y[k] = c.ys[i]; out.z[k] = c.zs[i]; out.cls[k] = c.cs[i];
+      }
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------------------
+  // Géométrie 2D
+  // ------------------------------------------------------------------------
+  /** GeoJSON Polygon/MultiPolygon -> liste de polygones, chacun liste d'anneaux [[x,y]...]. */
+  function toPolygons(geom) {
+    const strip = (ring) => ring.map((c) => [c[0], c[1]]);
+    if (geom.type === 'Polygon') return [geom.coordinates.map(strip)];
+    if (geom.type === 'MultiPolygon') return geom.coordinates.map((p) => p.map(strip));
+    return [];
+  }
+
+  function inRing(x, y, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+
+  function inPolygons(x, y, polys) {
+    for (const rings of polys) {
+      if (!inRing(x, y, rings[0])) continue;
+      let hole = false;
+      for (let r = 1; r < rings.length; r++) if (inRing(x, y, rings[r])) { hole = true; break; }
+      if (!hole) return true;
+    }
+    return false;
+  }
+
+  function ringArea(ring) {
+    let a = 0;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      a += (ring[j][0] + ring[i][0]) * (ring[j][1] - ring[i][1]);
+    }
+    return Math.abs(a / 2);
+  }
+
+  function polygonsArea(polys) {
+    let a = 0;
+    for (const rings of polys) {
+      a += ringArea(rings[0]);
+      for (let r = 1; r < rings.length; r++) a -= ringArea(rings[r]);
+    }
+    return a;
+  }
+
+  function polygonsBounds(polys) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const rings of polys) for (const [x, y] of rings[0]) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  // ------------------------------------------------------------------------
+  // Outils numériques
+  // ------------------------------------------------------------------------
+  function rng(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /** Plus petit vecteur propre d'une matrice 3x3 symétrique (Jacobi). */
+  function smallestEigenvector(m) {
+    const a = [[m[0], m[1], m[2]], [m[1], m[3], m[4]], [m[2], m[4], m[5]]];
+    const v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    for (let sweep = 0; sweep < 50; sweep++) {
+      let off = Math.abs(a[0][1]) + Math.abs(a[0][2]) + Math.abs(a[1][2]);
+      if (off < 1e-14) break;
+      for (let p = 0; p < 2; p++) for (let q = p + 1; q < 3; q++) {
+        if (Math.abs(a[p][q]) < 1e-18) continue;
+        const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+        const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1), s = t * c;
+        for (let k = 0; k < 3; k++) {
+          const akp = a[k][p], akq = a[k][q];
+          a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq;
+        }
+        for (let k = 0; k < 3; k++) {
+          const apk = a[p][k], aqk = a[q][k];
+          a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk;
+        }
+        for (let k = 0; k < 3; k++) {
+          const vkp = v[k][p], vkq = v[k][q];
+          v[k][p] = c * vkp - s * vkq; v[k][q] = s * vkp + c * vkq;
+        }
+      }
+    }
+    let idx = 0;
+    if (a[1][1] < a[idx][idx]) idx = 1;
+    if (a[2][2] < a[idx][idx]) idx = 2;
+    return [v[0][idx], v[1][idx], v[2][idx]];
+  }
+
+  /** Plan par ACP sur un sous-ensemble d'indices. Normale orientée vers le haut. */
+  function fitPlane(P, idx) {
+    let cx = 0, cy = 0, cz = 0;
+    for (const i of idx) { cx += P.x[i]; cy += P.y[i]; cz += P.z[i]; }
+    const n = idx.length;
+    cx /= n; cy /= n; cz /= n;
+    let xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+    for (const i of idx) {
+      const dx = P.x[i] - cx, dy = P.y[i] - cy, dz = P.z[i] - cz;
+      xx += dx * dx; xy += dx * dy; xz += dx * dz; yy += dy * dy; yz += dy * dz; zz += dz * dz;
+    }
+    let nv = smallestEigenvector([xx, xy, xz, yy, yz, zz]);
+    if (nv[2] < 0) nv = [-nv[0], -nv[1], -nv[2]];
+    const len = Math.hypot(nv[0], nv[1], nv[2]);
+    nv = [nv[0] / len, nv[1] / len, nv[2] / len];
+    return { n: nv, c: [cx, cy, cz] };
+  }
+
+  function distToPlane(pl, x, y, z) {
+    return Math.abs(pl.n[0] * (x - pl.c[0]) + pl.n[1] * (y - pl.c[1]) + pl.n[2] * (z - pl.c[2]));
+  }
+
+  function planeZ(pl, x, y) {
+    return pl.c[2] - (pl.n[0] * (x - pl.c[0]) + pl.n[1] * (y - pl.c[1])) / pl.n[2];
+  }
+
+  /** Grille de hachage 2D pour les recherches de voisinage. */
+  function makeGrid(P, idx, cell) {
+    const map = new Map();
+    for (const i of idx) {
+      const k = Math.floor(P.x[i] / cell) + ',' + Math.floor(P.y[i] / cell);
+      let arr = map.get(k);
+      if (!arr) map.set(k, (arr = []));
+      arr.push(i);
+    }
+    return { map, cell };
+  }
+
+  function neighbours(G, P, x, y, r, alive) {
+    const out = [];
+    const c = G.cell;
+    const x0 = Math.floor((x - r) / c), x1 = Math.floor((x + r) / c);
+    const y0 = Math.floor((y - r) / c), y1 = Math.floor((y + r) / c);
+    const r2 = r * r;
+    for (let gx = x0; gx <= x1; gx++) for (let gy = y0; gy <= y1; gy++) {
+      const arr = G.map.get(gx + ',' + gy);
+      if (!arr) continue;
+      for (const i of arr) {
+        if (alive && !alive[i]) continue;
+        const dx = P.x[i] - x, dy = P.y[i] - y;
+        if (dx * dx + dy * dy <= r2) out.push(i);
+      }
+    }
+    return out;
+  }
+
+  function hasNeighbour(G, P, x, y, r) {
+    const c = G.cell, r2 = r * r;
+    const x0 = Math.floor((x - r) / c), x1 = Math.floor((x + r) / c);
+    const y0 = Math.floor((y - r) / c), y1 = Math.floor((y + r) / c);
+    for (let gx = x0; gx <= x1; gx++) for (let gy = y0; gy <= y1; gy++) {
+      const arr = G.map.get(gx + ',' + gy);
+      if (!arr) continue;
+      for (const i of arr) {
+        const dx = P.x[i] - x, dy = P.y[i] - y;
+        if (dx * dx + dy * dy <= r2) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Plus grande composante connexe (au sens d'une grille 2D) d'un ensemble d'indices. */
+  function largestComponent(P, idx, cell) {
+    const cells = new Map();
+    for (const i of idx) {
+      const k = Math.floor(P.x[i] / cell) + ',' + Math.floor(P.y[i] / cell);
+      let arr = cells.get(k);
+      if (!arr) cells.set(k, (arr = []));
+      arr.push(i);
+    }
+    const seen = new Set();
+    let best = [];
+    for (const start of cells.keys()) {
+      if (seen.has(start)) continue;
+      const comp = [];
+      const stack = [start];
+      seen.add(start);
+      while (stack.length) {
+        const k = stack.pop();
+        comp.push(...cells.get(k));
+        const [gx, gy] = k.split(',').map(Number);
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+          const nk = (gx + dx) + ',' + (gy + dy);
+          if (cells.has(nk) && !seen.has(nk)) { seen.add(nk); stack.push(nk); }
+        }
+      }
+      if (comp.length > best.length) best = comp;
+    }
+    return best;
+  }
+
+  function median(arr) {
+    if (!arr.length) return NaN;
+    const s = Float64Array.from(arr).sort();
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  function quantile(arr, q) {
+    if (!arr.length) return NaN;
+    const s = Float64Array.from(arr).sort();
+    return s[Math.min(s.length - 1, Math.max(0, Math.round(q * (s.length - 1))))];
+  }
+
+  // ------------------------------------------------------------------------
+  // Analyse du toit
+  // ------------------------------------------------------------------------
+  const DEFAULTS = {
+    seuil: 0.15,          // m : tolérance point/plan (précision altimétrique LiDAR HD ~10 cm)
+    penteMax: 70,         // ° : au-delà, c'est un mur, pas un pan
+    iterations: 400,
+    rayonTirage: 2.5,     // m : tirage des triplets dans un voisinage local
+    celluleConnexe: 0.8,  // m : connexité d'un pan
+    surfaceMinPan: 1.5,   // m² : en dessous, pas un pan (cheminée, antenne)
+    maxPans: 14,
+    celluleMetre: 0.25,   // m : maille de partition de l'emprise
+    rayonAttribution: 1.5,// m : au-delà, la maille n'a pas de point pour la décider
+    graine: 1234,
+  };
+
+  /**
+   * P : {x,y,z,cls,count} en L93. footprint : GeoJSON (Polygon/MultiPolygon) L93.
+   * Renvoie pans, partition de l'emprise, hauteurs et indicateurs de qualité.
+   */
+  function analyseRoof(P, footprint, opts = {}) {
+    const o = Object.assign({}, DEFAULTS, opts);
+    const polys = toPolygons(footprint);
+    const emprise = polygonsArea(polys);
+    const bb = polygonsBounds(polys);
+
+    // Sol : points classés sol (2) autour du bâtiment.
+    const solZ = [];
+    for (let i = 0; i < P.count; i++) if (P.cls[i] === 2) solZ.push(P.z[i]);
+    let zSol = median(solZ);
+    if (!Number.isFinite(zSol)) {
+      const all = []; for (let i = 0; i < P.count; i++) all.push(P.z[i]);
+      zSol = quantile(all, 0.05);
+    }
+
+    // Points du toit : classe bâtiment (6) dans l'emprise.
+    let roof = [];
+    for (let i = 0; i < P.count; i++) {
+      if (P.cls[i] === 6 && P.x[i] >= bb.minX && P.x[i] <= bb.maxX && P.y[i] >= bb.minY && P.y[i] <= bb.maxY
+          && inPolygons(P.x[i], P.y[i], polys)) roof.push(i);
+    }
+    let source = 'classe bâtiment';
+    if (roof.length < 50) {
+      // Repli : tout ce qui dépasse 2 m au-dessus du sol dans l'emprise.
+      roof = [];
+      for (let i = 0; i < P.count; i++) {
+        if (P.z[i] > zSol + 2 && inPolygons(P.x[i], P.y[i], polys)) roof.push(i);
+      }
+      source = 'hauteur > 2 m (classification absente)';
+    }
+    const densite = roof.length / Math.max(emprise, 1);
+    const minPts = Math.max(15, Math.round(o.surfaceMinPan * densite));
+
+    // RANSAC séquentiel avec tirage local et graine fixe : même toit, même résultat.
+    const rand = rng(o.graine);
+    const alive = new Uint8Array(P.count);
+    for (const i of roof) alive[i] = 1;
+    let remaining = roof.length;
+    const G = makeGrid(P, roof, 1.0);
+    const cosMax = Math.cos((o.penteMax * Math.PI) / 180);
+    const planes = [];
+    let echecs = 0;
+
+    while (remaining >= minPts && planes.length < o.maxPans && echecs < 6) {
+      const vivants = roof.filter((i) => alive[i]);
+      let best = null, bestCount = 0;
+      for (let it = 0; it < o.iterations; it++) {
+        const a = vivants[Math.floor(rand() * vivants.length)];
+        const voisins = neighbours(G, P, P.x[a], P.y[a], o.rayonTirage, alive);
+        if (voisins.length < 3) continue;
+        const b = voisins[Math.floor(rand() * voisins.length)];
+        const c = voisins[Math.floor(rand() * voisins.length)];
+        if (a === b || b === c || a === c) continue;
+        const ux = P.x[b] - P.x[a], uy = P.y[b] - P.y[a], uz = P.z[b] - P.z[a];
+        const vx = P.x[c] - P.x[a], vy = P.y[c] - P.y[a], vz = P.z[c] - P.z[a];
+        let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        const len = Math.hypot(nx, ny, nz);
+        if (len < 1e-3) continue;
+        nx /= len; ny /= len; nz /= len;
+        if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+        if (nz < cosMax) continue;
+        const pl = { n: [nx, ny, nz], c: [P.x[a], P.y[a], P.z[a]] };
+        // Score sur le voisinage élargi : rapide et favorise les pans cohérents localement.
+        const zone = neighbours(G, P, P.x[a], P.y[a], o.rayonTirage * 3, alive);
+        let cnt = 0;
+        for (const i of zone) if (distToPlane(pl, P.x[i], P.y[i], P.z[i]) < o.seuil) cnt++;
+        if (cnt > bestCount) { bestCount = cnt; best = pl; }
+      }
+      if (!best) { echecs++; continue; }
+
+      // Affinage : inliers sur tout le toit, ACP, puis plus grande composante connexe.
+      let inl = vivants.filter((i) => distToPlane(best, P.x[i], P.y[i], P.z[i]) < o.seuil);
+      if (inl.length < 3) { echecs++; continue; }
+      let pl = fitPlane(P, inl);
+      for (let pass = 0; pass < 2; pass++) {
+        inl = vivants.filter((i) => distToPlane(pl, P.x[i], P.y[i], P.z[i]) < o.seuil);
+        inl = largestComponent(P, inl, o.celluleConnexe);
+        if (inl.length < 3) break;
+        pl = fitPlane(P, inl);
+      }
+      if (inl.length < minPts || pl.n[2] < cosMax) { echecs++; continue; }
+      for (const i of inl) alive[i] = 0;
+      remaining -= inl.length;
+      planes.push({ plane: pl, idx: inl });
+      echecs = 0;
+    }
+
+    // Fusion des pans coplanaires voisins (un pan coupé en deux par une cheminée).
+    let merged = true;
+    while (merged) {
+      merged = false;
+      outer: for (let i = 0; i < planes.length; i++) for (let j = i + 1; j < planes.length; j++) {
+        const A = planes[i].plane, B = planes[j].plane;
+        const dot = A.n[0] * B.n[0] + A.n[1] * B.n[1] + A.n[2] * B.n[2];
+        if (dot < Math.cos((4 * Math.PI) / 180)) continue;
+        if (distToPlane(A, B.c[0], B.c[1], B.c[2]) > 0.25 || distToPlane(B, A.c[0], A.c[1], A.c[2]) > 0.25) continue;
+        const idx = planes[i].idx.concat(planes[j].idx);
+        planes[i] = { plane: fitPlane(P, idx), idx };
+        planes.splice(j, 1);
+        merged = true;
+        break outer;
+      }
+    }
+
+    // Étiquette de pan par point. Le RANSAC donne les points d'une arête au
+    // premier pan extrait ; on réattribue chaque point au pan le plus proche
+    // parmi ceux présents à moins de 1,5 m, puis on réajuste les plans.
+    const label = new Int16Array(P.count).fill(-1);
+    for (let pass = 0; pass < 2; pass++) {
+      const grids = planes.map((p) => makeGrid(P, p.idx, 1.0));
+      const idxs = planes.map(() => []);
+      for (const i of roof) {
+        let best = -1, bd = o.seuil * 1.5;
+        for (let k = 0; k < planes.length; k++) {
+          const d = distToPlane(planes[k].plane, P.x[i], P.y[i], P.z[i]);
+          if (d >= bd) continue;
+          if (!hasNeighbour(grids[k], P, P.x[i], P.y[i], 1.5)) continue;
+          bd = d; best = k;
+        }
+        label[i] = best;
+        if (best >= 0) idxs[best].push(i);
+      }
+      for (let k = 0; k < planes.length; k++) {
+        if (idxs[k].length >= 3) planes[k] = { plane: fitPlane(P, idxs[k]), idx: idxs[k] };
+      }
+    }
+    const assigned = roof.filter((i) => label[i] >= 0);
+    const GA = makeGrid(P, assigned, 1.0);
+
+    // Partition de l'emprise : chaque maille prend le pan du point le plus proche.
+    const cs = o.celluleMetre;
+    const cells = planes.map(() => []);
+    const nCellsPan = new Array(planes.length).fill(0);
+    let nCellsVides = 0, nCellsTotal = 0;
+    const videsXY = [];
+    for (let gx = Math.floor(bb.minX / cs); gx * cs <= bb.maxX; gx++) {
+      for (let gy = Math.floor(bb.minY / cs); gy * cs <= bb.maxY; gy++) {
+        const x = (gx + 0.5) * cs, y = (gy + 0.5) * cs;
+        if (!inPolygons(x, y, polys)) continue;
+        nCellsTotal++;
+        const vois = neighbours(GA, P, x, y, o.rayonAttribution, null);
+        let bi = -1, bd = Infinity;
+        for (const i of vois) {
+          const d = (P.x[i] - x) ** 2 + (P.y[i] - y) ** 2;
+          if (d < bd) { bd = d; bi = i; }
+        }
+        if (bi < 0) { nCellsVides++; videsXY.push([x, y]); continue; }
+        const k = label[bi];
+        nCellsPan[k]++;
+        cells[k].push([x, y]);
+      }
+    }
+    // Les mailles recouvrent l'emprise au pas `cs` ; on recale sur l'aire exacte.
+    const aireMaille = nCellsTotal ? emprise / nCellsTotal : cs * cs;
+
+    const pans = planes.map((p, k) => {
+      const [nx, ny, nz] = p.plane.n;
+      const pente = (Math.acos(Math.min(1, nz)) * 180) / Math.PI;
+      let az = (Math.atan2(nx, ny) * 180) / Math.PI;
+      if (az < 0) az += 360;
+      const sol = nCellsPan[k] * aireMaille;
+      return {
+        plane: p.plane,
+        pente, pentePct: Math.tan((pente * Math.PI) / 180) * 100,
+        azimut: az,
+        surfaceSol: sol,
+        surfaceReelle: sol / nz,
+        points: p.idx.length,
+        cells: cells[k],
+      };
+    });
+
+    // Ordre de lecture : les plus grands pans d'abord.
+    const order = pans.map((_, k) => k).sort((a, b) => pans[b].surfaceSol - pans[a].surfaceSol);
+    const remap = new Int16Array(pans.length);
+    order.forEach((old, nw) => { remap[old] = nw; });
+    const pansTries = order.map((k) => pans[k]);
+    for (let i = 0; i < P.count; i++) if (label[i] >= 0) label[i] = remap[label[i]];
+
+    // Hauteurs sur les points posés sur un pan : un point de mur ou d'annexe basse ne fixe pas l'égout.
+    const zRoof = (assigned.length ? assigned : roof).map((i) => P.z[i]);
+    const surfSolPans = pansTries.reduce((s, p) => s + p.surfaceSol, 0);
+    return {
+      emprise,
+      zSol,
+      egout: quantile(zRoof, 0.03) - zSol,
+      faitage: quantile(zRoof, 0.99) - zSol,
+      pans: pansTries,
+      surfaceSolPans: surfSolPans,
+      surfaceReelle: pansTries.reduce((s, p) => s + p.surfaceReelle, 0),
+      surfaceSansPan: nCellsVides * aireMaille,
+      videsXY,
+      pointsToit: roof.length,
+      pointsExpliques: assigned.length,
+      densite,
+      label,
+      roofIdx: roof,
+      source,
+      maille: cs,
+    };
+  }
+
+  /**
+   * Contour d'un pan pour l'affichage : enveloppe convexe de ses mailles.
+   * `ratio` = aire de l'enveloppe / aire des mailles ; proche de 1, le pan est
+   * convexe (rectangle, trapèze, triangle) et l'enveloppe le dessine proprement.
+   */
+  function panOutline(cells, cs) {
+    const h = cs / 2, pts = [];
+    for (const [x, y] of cells) pts.push([x - h, y - h], [x + h, y - h], [x + h, y + h], [x - h, y + h]);
+    pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lower = [], upper = [];
+    for (const p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+    const aire = cells.length * cs * cs;
+    return { hull, ratio: aire ? ringArea(hull.concat([hull[0]])) / aire : Infinity };
+  }
+
+  const CARDINAUX = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
+  function cardinal(az) {
+    return CARDINAUX[Math.round((((az % 360) + 360) % 360) / 45) % 8];
+  }
+
+  /**
+   * Recale l'emprise BD TOPO sur le LiDAR.
+   *
+   * Les contours BD TOPO sont souvent décalés de 1 à 3 m par rapport au nuage
+   * (mesuré à Bernières : un pan entier coupé net par le contour). On cherche la
+   * translation qui met le plus de points « bâtiment » dedans et le moins de
+   * points sol/végétation. Renvoie la géométrie décalée et le décalage appliqué.
+   */
+  function recalerEmprise(P, geom, { portee = 2.5, pas = 0.25 } = {}) {
+    const polys = toPolygons(geom);
+    const bb = polygonsBounds(polys);
+    const solZ = [];
+    for (let i = 0; i < P.count; i++) if (P.cls[i] === 2) solZ.push(P.z[i]);
+    const zSol = solZ.length ? median(solZ) : -Infinity;
+
+    // Masque de l'emprise au pas `pas`, avec une marge de `portee`.
+    const ox = bb.minX - portee, oy = bb.minY - portee;
+    const nx = Math.ceil((bb.maxX - bb.minX + 2 * portee) / pas);
+    const ny = Math.ceil((bb.maxY - bb.minY + 2 * portee) / pas);
+    const mask = new Uint8Array(nx * ny);
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      if (inPolygons(ox + (i + 0.5) * pas, oy + (j + 0.5) * pas, polys)) mask[j * nx + i] = 1;
+    }
+    // Points utiles autour : +1 bâtiment en hauteur, -1 sol ou végétation.
+    const px = [], py = [], pw = [];
+    for (let i = 0; i < P.count; i++) {
+      const x = P.x[i], y = P.y[i];
+      if (x < bb.minX - 2 * portee || x > bb.maxX + 2 * portee || y < bb.minY - 2 * portee || y > bb.maxY + 2 * portee) continue;
+      const c = P.cls[i];
+      let w = 0;
+      if (c === 6 && P.z[i] > zSol + 1.5) w = 1;
+      else if (c >= 2 && c <= 5) w = -1;
+      if (!w) continue;
+      px.push(x); py.push(y); pw.push(w);
+    }
+    const steps = Math.round(portee / pas);
+    let best = { dx: 0, dy: 0, score: -Infinity }, score0 = 0;
+    for (let sx = -steps; sx <= steps; sx++) for (let sy = -steps; sy <= steps; sy++) {
+      const dx = sx * pas, dy = sy * pas;
+      let s = 0;
+      for (let k = 0; k < px.length; k++) {
+        // Point dans l'emprise décalée <=> point - décalage dans l'emprise d'origine.
+        const i = Math.floor((px[k] - dx - ox) / pas), j = Math.floor((py[k] - dy - oy) / pas);
+        if (i < 0 || j < 0 || i >= nx || j >= ny) continue;
+        if (mask[j * nx + i]) s += pw[k];
+      }
+      if (sx === 0 && sy === 0) score0 = s;
+      const better = s > best.score || (s === best.score && Math.hypot(dx, dy) < Math.hypot(best.dx, best.dy));
+      if (better) best = { dx, dy, score: s };
+    }
+    // On ne bouge que si le gain est net (évite un recalage sur du bruit).
+    const nBat = pw.filter((w) => w > 0).length;
+    if (best.score - score0 < Math.max(10, 0.06 * nBat)) best = { dx: 0, dy: 0, score: score0 };
+    const shift = (ring) => ring.map((c) => [c[0] + best.dx, c[1] + best.dy]);
+    const shifted = { type: 'MultiPolygon', coordinates: polys.map((rings) => rings.map(shift)) };
+    return { geom: shifted, dx: best.dx, dy: best.dy, gain: best.score - score0 };
+  }
+
+  root.EV3 = {
+    parseHeader, parseHierarchyPage, keyBoundsXY, loadCopcBox,
+    toPolygons, inPolygons, polygonsArea, polygonsBounds,
+    fitPlane, planeZ, analyseRoof, recalerEmprise, panOutline, cardinal, median, quantile, DEFAULTS,
+  };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+
+</script>
+</head>
+<body>
+<div class="app">
+  <div class="scene" id="scene">
+    <div class="empty" id="empty">
+      <div><strong>Le toit, point par point</strong>Saisissez une adresse : le relevé LiDAR HD de l'IGN s'affiche en 3D, avec chaque pan mesuré.</div>
+    </div>
+    <div class="scene-tools" id="tools" hidden>
+      <button class="chip" id="tPoints" aria-pressed="true">Points LiDAR</button>
+      <button class="chip" id="tPans" aria-pressed="true">Pans</button>
+      <button class="chip" id="tHaut" aria-pressed="false">Couleur hauteur</button>
+      <button class="chip" id="tTop">Vue de dessus</button>
+      <button class="chip" id="t3d">Vue 3D</button>
+    </div>
+    <div class="scene-hint" id="hint" hidden>Un doigt pour tourner, deux pour zoomer. Touchez un autre bâtiment pour le mesurer.</div>
+  </div>
+
+  <aside class="panel">
+    <div class="brand"><h1>Everest Métré 3D</h1><span>LiDAR HD · IGN</span><a class="back" href="./">← Métré</a></div>
+
+    <form class="search" id="form" autocomplete="off">
+      <label for="q">Adresse du chantier</label>
+      <div class="search-row">
+        <input id="q" name="q" type="text" placeholder="12 rue de la Mer, 14990 Bernières-sur-Mer" aria-autocomplete="list" aria-controls="sugg">
+        <button class="btn" id="go" type="submit">Mesurer</button>
+      </div>
+      <ul class="suggest" id="sugg" role="listbox" hidden></ul>
+    </form>
+
+    <div>
+      <div class="status" id="status">Adresse, ou coordonnées GPS « 49.3312, -0.4221 ».</div>
+      <div class="bar" id="bar" hidden><i></i></div>
+    </div>
+
+    <section id="result" hidden>
+      <div class="total">
+        <span class="eyebrow">Surface réelle de couverture</span>
+        <span class="big" id="rTotal">—</span>
+        <span class="addr" id="rAddr"></span>
+      </div>
+      <dl class="facts" style="margin-top:14px">
+        <div><dt>Emprise au sol</dt><dd id="rEmprise">—</dd></div>
+        <div><dt>Pans détectés</dt><dd id="rNb">—</dd></div>
+        <div><dt>Hauteur à l'égout</dt><dd id="rEgout">—</dd></div>
+        <div><dt>Hauteur au faîtage</dt><dd id="rFaitage">—</dd></div>
+      </dl>
+      <h2 style="margin-top:18px">Pan par pan</h2>
+      <div style="overflow-x:auto">
+        <table class="pans" id="rTable">
+          <thead><tr><th>Pan</th><th>Pente</th><th>Orient.</th><th>Au sol</th><th>Réelle</th></tr></thead>
+          <tbody></tbody>
+          <tfoot></tfoot>
+        </table>
+      </div>
+      <ul class="notes" id="rNotes" style="margin-top:14px"></ul>
+    </section>
+
+    <p class="src">Sources : IGN — LiDAR HD, BD TOPO®, BD ORTHO®, géocodage Géoplateforme — Licence Ouverte Etalab 2.0. Estimation à distance : ne remplace pas la visite avant devis.</p>
+  </aside>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/+esm';
+import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js/+esm';
+
+const EV3 = window.EV3;
+const GEOPF = 'https://data.geopf.fr';
+const LAZ_BASE = 'https://cdn.jsdelivr.net/npm/laz-perf@0.0.7/lib/web/';
+const LIDAR_LAYERS = ['IGNF_LIDAR-HD_METADONNEE:metadata', 'IGNF_NUAGES-DE-POINTS-LIDAR-HD:dalle'];
+const MARGE = 12;   // m autour du bâtiment
+const PAN_COLORS = ['#f2b705', '#3fa7d6', '#ee6352', '#59cd90', '#b388eb', '#fa8334', '#4ecdc4', '#e56b9f', '#9bc53d', '#5c80bc', '#f4d35e', '#c97c5d', '#7bdff2', '#d4a5a5'];
+
+proj4.defs('EPSG:2154', '+proj=lcc +lat_0=46.5 +lon_0=3 +lat_1=49 +lat_2=44 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs');
+const toL93 = (lon, lat) => proj4('EPSG:4326', 'EPSG:2154', [lon, lat]);
+
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 1) => v.toLocaleString('fr-FR', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+// ------------------------------------------------------------------ état
+const S = { load: null, bats: [], bat: null, polys: null, shift: [0, 0], res: null, origin: null, lazPerf: null, busy: false, adresse: '' };
+const shifted = (polys) => polys.map((rings) => rings.map((r) => r.map(([x, y]) => [x + S.shift[0], y + S.shift[1]])));
+
+// ------------------------------------------------------------------ UI
+function status(msg, err = false) { const el = $('status'); el.textContent = msg; el.classList.toggle('err', err); }
+function progress(p) { const b = $('bar'); if (p == null) { b.hidden = true; return; } b.hidden = false; b.firstElementChild.style.width = Math.round(p * 100) + '%'; }
+
+class UserError extends Error {}
+
+async function getJSON(url, what) {
+  let r;
+  try { r = await fetch(url); } catch { throw new UserError(`${what} : l'IGN ne répond pas. Vérifiez la connexion et réessayez.`); }
+  if (!r.ok) throw new UserError(`${what} : le service IGN a répondu ${r.status}.`);
+  return r.json();
+}
+
+async function fetchRange(url, start, end) {
+  const ctl = new AbortController();
+  let r;
+  try { r = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, signal: ctl.signal }); }
+  catch { throw new UserError("Lecture du LiDAR : l'IGN ne répond pas. Réessayez dans un instant."); }
+  if (r.status !== 206) {
+    ctl.abort(); // un 200 enverrait la dalle entière (~170 Mo)
+    throw new UserError(`Lecture du LiDAR refusée par le serveur (HTTP ${r.status}).`);
+  }
+  return new Uint8Array(await r.arrayBuffer());
+}
+
+// ------------------------------------------------------------------ données IGN
+async function geocode(q) {
+  const m = q.trim().match(/^(-?\d+(?:[.,]\d+)?)\s*[,; ]\s*(-?\d+(?:[.,]\d+)?)$/);
+  if (m) {
+    const lat = parseFloat(m[1].replace(',', '.')), lon = parseFloat(m[2].replace(',', '.'));
+    return { lon, lat, label: `${lat.toFixed(5)}, ${lon.toFixed(5)}` };
+  }
+  const j = await getJSON(`${GEOPF}/geocodage/search?q=${encodeURIComponent(q)}&index=address&limit=1`, 'Géocodage');
+  const f = j.features && j.features[0];
+  if (!f) throw new UserError('Adresse introuvable. Ajoutez le code postal, ou collez des coordonnées GPS (lat, lon).');
+  const [lon, lat] = f.geometry.coordinates;
+  return { lon, lat, label: f.properties.label };
+}
+
+async function suggestions(q) {
+  const j = await getJSON(`${GEOPF}/geocodage/search?q=${encodeURIComponent(q)}&index=address&limit=5&autocomplete=1`, 'Suggestions');
+  return (j.features || []).map((f) => f.properties.label);
+}
+
+function bboxParam(b) { return `${b.minX},${b.minY},${b.maxX},${b.maxY},EPSG:2154`; }
+
+async function buildingsAround(x, y, r) {
+  const b = { minX: x - r, minY: y - r, maxX: x + r, maxY: y + r };
+  const p = new URLSearchParams({ SERVICE: 'WFS', VERSION: '2.0.0', REQUEST: 'GetFeature', TYPENAMES: 'BDTOPO_V3:batiment', SRSNAME: 'EPSG:2154', OUTPUTFORMAT: 'application/json', COUNT: '300', BBOX: bboxParam(b) });
+  const j = await getJSON(`${GEOPF}/wfs/ows?${p}`, 'Bâtiments BD TOPO');
+  return (j.features || []).filter((f) => f.geometry).map((f) => ({
+    id: f.id, geom: f.geometry, polys: EV3.toPolygons(f.geometry), props: f.properties,
+  }));
+}
+
+function distToPolys(x, y, polys) {
+  if (EV3.inPolygons(x, y, polys)) return 0;
+  let best = Infinity;
+  for (const rings of polys) for (const ring of rings) for (let i = 1; i < ring.length; i++) {
+    const [ax, ay] = ring[i - 1], [bx, by] = ring[i];
+    const dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L));
+    best = Math.min(best, Math.hypot(x - ax - t * dx, y - ay - t * dy));
+  }
+  return best;
+}
+
+async function lidarTiles(box) {
+  for (const layer of LIDAR_LAYERS) {
+    const p = new URLSearchParams({ SERVICE: 'WFS', VERSION: '2.0.0', REQUEST: 'GetFeature', TYPENAMES: layer, SRSNAME: 'EPSG:2154', OUTPUTFORMAT: 'application/json', COUNT: '8', BBOX: bboxParam(box) });
+    let r;
+    try { r = await fetch(`${GEOPF}/wfs/ows?${p}`); } catch { continue; }
+    if (!r.ok) continue; // couche renommée : on essaie la suivante
+    const j = await r.json();
+    const tiles = (j.features || []).map((f) => {
+      const pr = f.properties || {};
+      let meta = {};
+      try { meta = typeof pr.metadata === 'string' ? JSON.parse(pr.metadata) : (pr.metadata || {}); } catch {}
+      const url = pr.url || pr.url_npl;
+      return url ? { url, date: meta.date_debut_acquisition || pr.date_debut_acquisition || null } : null;
+    }).filter(Boolean);
+    return tiles;
+  }
+  throw new UserError("Index des dalles LiDAR HD indisponible. Réessayez plus tard.");
+}
+
+async function ensureLazPerf() {
+  if (!S.lazPerf) S.lazPerf = await createLazPerf({ locateFile: (f) => LAZ_BASE + f });
+  return S.lazPerf;
+}
+
+async function loadPoints(box) {
+  status('Recherche de la dalle LiDAR HD…');
+  const tiles = await lidarTiles(box);
+  if (!tiles.length) throw new UserError("Le LiDAR HD ne couvre pas encore ce secteur (ou l'adresse est hors de France).");
+  const L = await ensureLazPerf();
+  const parts = [];
+  for (let t = 0; t < tiles.length; t++) {
+    status(`Lecture du relevé LiDAR${tiles.length > 1 ? ` (dalle ${t + 1}/${tiles.length})` : ''}…`);
+    parts.push(await EV3.loadCopcBox(tiles[t].url, box, {
+      fetchRange, lazPerf: L,
+      onProgress: (p) => progress((t + p) / tiles.length),
+    }));
+  }
+  const n = parts.reduce((s, p) => s + p.count, 0);
+  const P = { x: new Float64Array(n), y: new Float64Array(n), z: new Float64Array(n), cls: new Uint8Array(n), count: n };
+  let k = 0;
+  for (const p of parts) { P.x.set(p.x, k); P.y.set(p.y, k); P.z.set(p.z, k); P.cls.set(p.cls, k); k += p.count; }
+  const bytes = parts.reduce((s, p) => s + p.bytes, 0);
+  return { P, box, dates: tiles.map((t) => t.date).filter(Boolean), bytes };
+}
+
+// ------------------------------------------------------------------ 3D
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 3000);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+$('scene').prepend(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.495;
+scene.add(new THREE.AmbientLight(0xffffff, 1.4));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(-30, 60, 40);
+scene.add(sun);
+
+const layers = { ground: new THREE.Group(), points: new THREE.Group(), pans: new THREE.Group(), outlines: new THREE.Group(), walls: new THREE.Group() };
+Object.values(layers).forEach((g) => scene.add(g));
+
+function resize() {
+  const el = $('scene');
+  const w = el.clientWidth, h = el.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / Math.max(h, 1);
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe($('scene'));
+resize();
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+
+const W = (x, y, z) => new THREE.Vector3(x - S.origin[0], z - S.origin[2], -(y - S.origin[1]));
+
+function clear(g) {
+  while (g.children.length) {
+    const c = g.children.pop();
+    c.geometry && c.geometry.dispose();
+    if (c.material) { c.material.map && c.material.map.dispose(); c.material.dispose(); }
+  }
+}
+
+function drawGround(box) {
+  clear(layers.ground);
+  const w = box.maxX - box.minX, h = box.maxY - box.minY;
+  const px = Math.min(1024, Math.round(Math.max(w, h) / 0.2));
+  const url = `${GEOPF}/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=HR.ORTHOIMAGERY.ORTHOPHOTOS&STYLES=&CRS=EPSG:2154&BBOX=${box.minX},${box.minY},${box.maxX},${box.maxY}&WIDTH=${Math.round(px * w / Math.max(w, h))}&HEIGHT=${Math.round(px * h / Math.max(w, h))}&FORMAT=image/jpeg`;
+  const mat = new THREE.MeshBasicMaterial({ color: 0x3a444c });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+  mesh.rotation.x = -Math.PI / 2;
+  const c = W((box.minX + box.maxX) / 2, (box.minY + box.maxY) / 2, S.origin[2] - 0.05);
+  mesh.position.copy(c);
+  layers.ground.add(mesh);
+  new THREE.TextureLoader().setCrossOrigin('anonymous').load(url, (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    mat.map = tex; mat.color.set(0xc4c8ca); mat.needsUpdate = true;
+  });
+  // Repère nord
+  const n = label('N', '#e8ebe7', '#0d1216');
+  n.position.copy(W(c.x + S.origin[0], box.maxY - 2, S.origin[2] + 1));
+  n.scale.set(2.2, 2.2, 1);
+  layers.ground.add(n);
+}
+
+function label(text, bg, fg) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 128;
+  const g = cv.getContext('2d');
+  g.fillStyle = bg; g.beginPath(); g.arc(64, 64, 58, 0, Math.PI * 2); g.fill();
+  g.fillStyle = fg; g.font = '700 70px "Barlow Condensed", sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 64, 68);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+  sp.renderOrder = 10;
+  return sp;
+}
+
+function drawPoints() {
+  clear(layers.points);
+  const { P } = S.load;
+  const keep = [];
+  for (let i = 0; i < P.count; i++) if (P.cls[i] !== 2) keep.push(i);
+  const pos = new Float32Array(keep.length * 3);
+  keep.forEach((i, k) => { const v = W(P.x[i], P.y[i], P.z[i]); pos[k * 3] = v.x; pos[k * 3 + 1] = v.y; pos[k * 3 + 2] = v.z; });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(keep.length * 3), 3));
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.16, vertexColors: true, sizeAttenuation: true }));
+  pts.userData.keep = keep;
+  layers.points.add(pts);
+  colorPoints();
+}
+
+function colorPoints() {
+  const pts = layers.points.children[0];
+  if (!pts) return;
+  const { P } = S.load;
+  const keep = pts.userData.keep;
+  const col = pts.geometry.attributes.color.array;
+  const byHeight = $('tHaut').getAttribute('aria-pressed') === 'true';
+  const lab = S.res ? S.res.label : null;
+  const inRoof = new Uint8Array(P.count);
+  if (S.res) for (const i of S.res.roofIdx) inRoof[i] = 1;
+  const pal = PAN_COLORS.map((h) => new THREE.Color(h));
+  const tmp = new THREE.Color();
+  let zmin = Infinity, zmax = -Infinity;
+  if (byHeight) for (const i of keep) { if (P.z[i] < zmin) zmin = P.z[i]; if (P.z[i] > zmax) zmax = P.z[i]; }
+  keep.forEach((i, k) => {
+    if (byHeight) {
+      const t = (P.z[i] - zmin) / Math.max(zmax - zmin, 1);
+      tmp.setHSL(0.62 - 0.58 * t, 0.75, 0.5);
+    } else if (inRoof[i]) {
+      if (lab[i] >= 0) tmp.copy(pal[lab[i] % pal.length]); else tmp.set('#ffffff');
+    } else if (P.cls[i] === 6) tmp.set('#7d8a94');
+    else if (P.cls[i] >= 3 && P.cls[i] <= 5) tmp.set('#4f7a55');
+    else tmp.set('#5d666d');
+    col[k * 3] = tmp.r; col[k * 3 + 1] = tmp.g; col[k * 3 + 2] = tmp.b;
+  });
+  pts.geometry.attributes.color.needsUpdate = true;
+}
+
+function drawPans() {
+  clear(layers.pans); clear(layers.walls);
+  const res = S.res, cs = res.maille, h = cs / 2;
+  res.pans.forEach((p, k) => {
+    const color = PAN_COLORS[k % PAN_COLORS.length];
+    const ol = EV3.panOutline(p.cells, cs);
+    const zAt = (x, y) => W(x, y, EV3.planeZ(p.plane, x, y));
+    let pos;
+    if (ol.ratio < 1.35) {
+      // Pan convexe : un polygone propre posé sur le plan mesuré.
+      pos = [];
+      const c0 = zAt(ol.hull[0][0], ol.hull[0][1]);
+      for (let i = 1; i < ol.hull.length - 1; i++) {
+        pos.push(...c0.toArray(), ...zAt(ol.hull[i][0], ol.hull[i][1]).toArray(), ...zAt(ol.hull[i + 1][0], ol.hull[i + 1][1]).toArray());
+      }
+      const edge = ol.hull.concat([ol.hull[0]]).map(([x, y]) => zAt(x, y).add(new THREE.Vector3(0, 0.02, 0)));
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(edge), new THREE.LineBasicMaterial({ color: 0x0d1216, transparent: true, opacity: 0.7 }));
+      line.userData.pan = k;
+      layers.pans.add(line);
+    } else {
+      // Pan irrégulier (autour d'une lucarne…) : on garde le dessin maille par maille.
+      pos = [];
+      for (const [x, y] of p.cells) {
+        const corners = [[x - h, y - h], [x + h, y - h], [x + h, y + h], [x - h, y - h], [x + h, y + h], [x - h, y + h]];
+        for (const [cx, cy] of corners) pos.push(...zAt(cx, cy).toArray());
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.62, side: THREE.DoubleSide, depthWrite: false });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.userData.pan = k;
+    layers.pans.add(mesh);
+    // Numéro du pan au barycentre des mailles
+    let sx = 0, sy = 0;
+    for (const [x, y] of p.cells) { sx += x; sy += y; }
+    const cx = sx / p.cells.length, cy = sy / p.cells.length;
+    const lb = label(String(k + 1), PAN_COLORS[k % PAN_COLORS.length], '#111');
+    lb.position.copy(W(cx, cy, EV3.planeZ(p.plane, cx, cy) + 0.6));
+    lb.scale.set(1.1, 1.1, 1);
+    layers.pans.add(lb);
+  });
+  // Murs : du sol jusqu'au bord du toit, arête par arête. La maquette se lit comme une maison.
+  const cellPan = new Map();
+  res.pans.forEach((p, k) => { for (const [x, y] of p.cells) cellPan.set(Math.floor(x / cs) + ',' + Math.floor(y / cs), k); });
+  const roofZ = (x, y) => {
+    const gx = Math.floor(x / cs), gy = Math.floor(y / cs);
+    for (let r = 0; r <= 6; r++) for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+      const k = cellPan.get((gx + dx) + ',' + (gy + dy));
+      if (k !== undefined) return Math.max(res.zSol + 0.5, EV3.planeZ(res.pans[k].plane, x, y));
+    }
+    return res.zSol + res.egout;
+  };
+  const wallMat = new THREE.MeshLambertMaterial({ color: 0xd9dedf, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false });
+  const pos = [];
+  for (const rings of S.polys) {
+    const ring = rings[0];
+    for (let i = 1; i < ring.length; i++) {
+      const [ax, ay] = ring[i - 1], [bx, by] = ring[i];
+      const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / 0.5));
+      for (let s = 0; s < n; s++) {
+        const x0 = ax + (bx - ax) * s / n, y0 = ay + (by - ay) * s / n;
+        const x1 = ax + (bx - ax) * (s + 1) / n, y1 = ay + (by - ay) * (s + 1) / n;
+        const a0 = W(x0, y0, res.zSol), b0 = W(x1, y1, res.zSol), a1 = W(x0, y0, roofZ(x0, y0)), b1 = W(x1, y1, roofZ(x1, y1));
+        pos.push(...a0.toArray(), ...b0.toArray(), ...b1.toArray(), ...a0.toArray(), ...b1.toArray(), ...a1.toArray());
+      }
+    }
+  }
+  const wgeo = new THREE.BufferGeometry();
+  wgeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  wgeo.computeVertexNormals();
+  layers.walls.add(new THREE.Mesh(wgeo, wallMat));
+}
+
+function drawOutlines() {
+  clear(layers.outlines);
+  for (const b of S.bats) {
+    const sel = b === S.bat;
+    for (const rings of shifted(b.polys)) {
+      const pts = rings[0].map(([x, y]) => W(x, y, S.origin[2] + 0.08));
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: sel ? 0xf2b705 : 0xffffff, transparent: !sel, opacity: sel ? 1 : 0.35 }));
+      layers.outlines.add(line);
+    }
+  }
+}
+
+function frame(top = false) {
+  const bb = EV3.polygonsBounds(S.polys);
+  const c = W((bb.minX + bb.maxX) / 2, (bb.minY + bb.maxY) / 2, S.res ? S.res.zSol + S.res.egout : S.origin[2]);
+  const r = Math.max(bb.maxX - bb.minX, bb.maxY - bb.minY, 8);
+  controls.target.copy(c);
+  if (top) camera.position.set(c.x, c.y + r * 2.4, c.z + 0.01);
+  else camera.position.set(c.x - r * 1.4, c.y + r * 1.25, c.z + r * 1.8);
+  controls.update();
+}
+
+// Toucher un autre bâtiment : clic court sur le sol.
+let down = null;
+renderer.domElement.addEventListener('pointerdown', (e) => { down = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (!down || !S.load || S.busy) return;
+  if (Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 6) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const hit = new THREE.Vector3();
+  if (!ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit)) return;
+  const X = hit.x + S.origin[0], Y = -hit.z + S.origin[1];
+  const b = S.bats.find((bb) => EV3.inPolygons(X, Y, shifted(bb.polys)));
+  if (b && b !== S.bat) selectBuilding(b, `Bâtiment voisin (${fmt(EV3.polygonsArea(b.polys), 0)} m² au sol)`);
+});
+
+// ------------------------------------------------------------------ pipeline
+async function run(q) {
+  if (S.busy) return;
+  S.busy = true; $('go').disabled = true;
+  try {
+    status('Recherche de l\'adresse…'); progress(null);
+    const g = await geocode(q);
+    const [x, y] = toL93(g.lon, g.lat);
+    status('Recherche du bâtiment…');
+    const bats = await buildingsAround(x, y, 45);
+    if (!bats.length) throw new UserError('Aucun bâtiment BD TOPO à cet endroit.');
+    const bat = bats.map((b) => ({ b, d: distToPolys(x, y, b.polys) })).sort((a, c) => a.d - c.d)[0].b;
+    S.bats = bats;
+    await selectBuilding(bat, g.label, true);
+  } catch (e) {
+    console.error(e);
+    status(e instanceof UserError ? e.message : `Erreur inattendue : ${e.message}`, true);
+    progress(null);
+  } finally {
+    S.busy = false; $('go').disabled = false;
+  }
+}
+
+async function selectBuilding(bat, adresse, force = false) {
+  const wasBusy = S.busy; S.busy = true;
+  try {
+    const bb = EV3.polygonsBounds(bat.polys);
+    const need = { minX: bb.minX - MARGE, minY: bb.minY - MARGE, maxX: bb.maxX + MARGE, maxY: bb.maxY + MARGE };
+    const covered = S.load && need.minX >= S.load.box.minX && need.maxX <= S.load.box.maxX && need.minY >= S.load.box.minY && need.maxY <= S.load.box.maxY;
+    if (force || !covered) {
+      S.res = null;
+      const load = await loadPoints(need);
+      if (!load.P.count) throw new UserError('Aucun point LiDAR dans cette emprise.');
+      S.load = load;
+      const zs = []; for (let i = 0; i < load.P.count; i++) if (load.P.cls[i] === 2) zs.push(load.P.z[i]);
+      S.origin = [(need.minX + need.maxX) / 2, (need.minY + need.maxY) / 2, zs.length ? EV3.median(zs) : EV3.quantile(Array.from(load.P.z), 0.05)];
+      drawGround(need);
+      drawPoints();
+    }
+    S.bat = bat; S.adresse = adresse;
+    status('Détection des pans…'); progress(1);
+    await new Promise((r) => setTimeout(r, 20));
+    const rec = EV3.recalerEmprise(S.load.P, bat.geom);
+    S.shift = [rec.dx, rec.dy];
+    S.polys = EV3.toPolygons(rec.geom);
+    S.res = EV3.analyseRoof(S.load.P, rec.geom);
+    if (!S.res.pans.length) throw new UserError("Aucun pan exploitable sur ce bâtiment (toit trop petit, masqué par la végétation, ou non classé par l'IGN).");
+    colorPoints(); drawPans(); drawOutlines(); applyToggles();
+    if (force || !covered) frame();
+    render();
+    $('empty').hidden = true; $('tools').hidden = false; $('hint').hidden = false;
+    status(`${fmt(S.res.pointsToit, 0)} points sur le toit · ${(S.load.bytes / 1e6).toFixed(1)} Mo lus`);
+    progress(null);
+  } catch (e) {
+    console.error(e);
+    status(e instanceof UserError ? e.message : `Erreur inattendue : ${e.message}`, true);
+    progress(null);
+  } finally {
+    S.busy = wasBusy;
+  }
+}
+
+function render() {
+  const r = S.res;
+  $('result').hidden = false;
+  $('rTotal').innerHTML = `${fmt(r.surfaceReelle)}<small>m²</small>`;
+  $('rAddr').textContent = S.adresse;
+  $('rEmprise').textContent = `${fmt(r.emprise)} m²`;
+  $('rNb').textContent = String(r.pans.length);
+  $('rEgout').textContent = `${fmt(r.egout)} m`;
+  $('rFaitage').textContent = `${fmt(r.faitage)} m`;
+  const tb = $('rTable').tBodies[0];
+  tb.innerHTML = '';
+  r.pans.forEach((p, k) => {
+    const tr = document.createElement('tr');
+    tr.dataset.pan = k;
+    tr.innerHTML = `<td><span class="sw" style="background:${PAN_COLORS[k % PAN_COLORS.length]}">${k + 1}</span></td>
+      <td>${fmt(p.pente, 0)}° <span style="color:var(--ink-soft)">${fmt(p.pentePct, 0)} %</span></td>
+      <td>${EV3.cardinal(p.azimut)}</td><td>${fmt(p.surfaceSol)}</td><td>${fmt(p.surfaceReelle)}</td>`;
+    tr.addEventListener('click', () => highlight(k, tr));
+    tb.appendChild(tr);
+  });
+  $('rTable').tFoot.innerHTML = `<tr><td>Total</td><td></td><td></td><td>${fmt(r.surfaceSolPans)}</td><td>${fmt(r.surfaceReelle)}</td></tr>`;
+
+  const notes = [];
+  const expl = r.pointsExpliques / Math.max(r.pointsToit, 1);
+  const trou = r.surfaceSansPan / Math.max(r.emprise, 1);
+  const dates = S.load.dates.map((d) => new Date(String(d).slice(0, 10))).filter((d) => !isNaN(d));
+  if (dates.length) notes.push(['', `Relevé LiDAR de ${dates[0].toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })}. Un toit modifié depuis n'apparaît pas.`]);
+  notes.push([expl < 0.8 ? 'warn' : '', `${Math.round(expl * 100)} % des points du toit tombent sur un pan${expl < 0.8 ? ' : lucarnes, cheminées ou végétation à vérifier sur place.' : '.'} Densité ${fmt(r.densite, 0)} pts/m².`]);
+  if (trou > 0.05) notes.push(['warn', `${fmt(r.surfaceSansPan)} m² d'emprise sans point exploitable (${Math.round(trou * 100)} %), non comptés dans le total.`]);
+  const dec = Math.hypot(S.shift[0], S.shift[1]);
+  if (dec > 0) notes.push(['', `Contour BD TOPO recalé de ${fmt(dec)} m sur le relevé LiDAR.`]);
+  if (r.source !== 'classe bâtiment') notes.push(['warn', `Points du toit retenus par ${r.source}.`]);
+  notes.push(['', 'Surface réelle = surface au sol de chaque pan ÷ cos(pente), débords inclus dans la limite de l\'emprise BD TOPO.']);
+  $('rNotes').innerHTML = notes.map(([c, t]) => `<li class="${c}">${t}</li>`).join('');
+}
+
+function highlight(k, tr) {
+  const on = !tr.classList.contains('on');
+  document.querySelectorAll('.pans tbody tr').forEach((r) => r.classList.remove('on'));
+  if (on) tr.classList.add('on');
+  layers.pans.children.forEach((m) => {
+    if (m.userData.pan === undefined) return;
+    m.material.opacity = !on ? 0.62 : (m.userData.pan === k ? 0.92 : 0.12);
+  });
+}
+
+// ------------------------------------------------------------------ contrôles
+function toggle(btn) { btn.setAttribute('aria-pressed', btn.getAttribute('aria-pressed') === 'true' ? 'false' : 'true'); applyToggles(); }
+function applyToggles() {
+  layers.points.visible = $('tPoints').getAttribute('aria-pressed') === 'true';
+  const pans = $('tPans').getAttribute('aria-pressed') === 'true';
+  layers.pans.visible = pans; layers.walls.visible = pans;
+}
+$('tPoints').onclick = () => toggle($('tPoints'));
+$('tPans').onclick = () => toggle($('tPans'));
+$('tHaut').onclick = () => { toggle($('tHaut')); colorPoints(); };
+$('tTop').onclick = () => S.bat && frame(true);
+$('t3d').onclick = () => S.bat && frame(false);
+
+// Recherche + suggestions
+const q = $('q'), sugg = $('sugg');
+let timer = null, lastQ = '';
+q.addEventListener('input', () => {
+  clearTimeout(timer);
+  const v = q.value.trim();
+  if (v.length < 4 || /^-?\d+[.,]\d+\s*[,; ]/.test(v)) { sugg.hidden = true; return; }
+  timer = setTimeout(async () => {
+    lastQ = v;
+    try {
+      const list = await suggestions(v);
+      if (lastQ !== v) return;
+      sugg.innerHTML = '';
+      list.forEach((l) => {
+        const li = document.createElement('li');
+        li.textContent = l; li.setAttribute('role', 'option');
+        li.addEventListener('mousedown', (e) => { e.preventDefault(); q.value = l; sugg.hidden = true; run(l); });
+        sugg.appendChild(li);
+      });
+      sugg.hidden = !list.length;
+    } catch { sugg.hidden = true; }
+  }, 250);
+});
+q.addEventListener('blur', () => setTimeout(() => { sugg.hidden = true; }, 150));
+$('form').addEventListener('submit', (e) => { e.preventDefault(); sugg.hidden = true; if (q.value.trim()) run(q.value); });
+
+// Lien direct : page.html#49.3312,-0.4221
+const h = decodeURIComponent(location.hash.slice(1));
+if (h) { q.value = h; run(h); }
+</script>
+</body>
+</html>
