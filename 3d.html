@@ -770,6 +770,58 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
     const segs = [];
     for (const rings of polys) for (const r of rings) for (let i = 1; i < r.length; i++) segs.push([r[i - 1], r[i]]);
 
+    // Régularisation : un vrai toit a ses pans d'équerre avec les murs et ses
+    // égouts de niveau. Le LiDAR donne chaque pan à ± quelques degrés près ; ces
+    // écarts font pencher le bas du toit. On cale donc l'orientation de chaque
+    // pan sur les axes du bâtiment (si l'écart est < 12°), puis on met à la même
+    // hauteur les égouts qui sont à moins de 40 cm les uns des autres.
+    {
+      const hist = new Float64Array(90);
+      for (const [a, b] of segs) {
+        const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (L < 0.5) continue;
+        const d = ((((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) % 90) + 90) % 90;
+        for (let t = -3; t <= 3; t++) hist[(Math.round(d) + t + 90) % 90] += L * (1 - Math.abs(t) / 4);
+      }
+      let th0 = 0;
+      for (let i = 1; i < 90; i++) if (hist[i] > hist[th0]) th0 = i;
+      // angle fin : moyenne pondérée des murs à moins de 4° de l'axe trouvé
+      let sw = 0, sa = 0;
+      for (const [a, b] of segs) {
+        const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const d = ((((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) % 90) + 90) % 90;
+        let e = d - th0; if (e > 45) e -= 90; if (e < -45) e += 90;
+        if (Math.abs(e) <= 4) { sw += L; sa += L * e; }
+      }
+      const axe = th0 + (sw ? sa / sw : 0);
+      pans.forEach((p, k) => {
+        const [nx, ny, nz] = p.plane.n, h = Math.hypot(nx, ny);
+        if (h < 0.05) return; // toit plat : rien à orienter
+        const phi = (Math.atan2(ny, nx) * 180) / Math.PI;
+        let best = null, bd = 12;
+        for (let m = 0; m < 4; m++) {
+          const c = axe + m * 90, d = Math.abs(((((phi - c) % 360) + 540) % 360) - 180);
+          if (d < bd) { bd = d; best = c; }
+        }
+        if (best === null) return;
+        const r = (best * Math.PI) / 180, n2 = [h * Math.cos(r), h * Math.sin(r), nz];
+        const [cx, cy, cz] = p.plane.c;
+        PL[k] = { a: -n2[0] / n2[2], b: -n2[1] / n2[2], c: cz + (n2[0] * cx + n2[1] * cy) / n2[2] };
+      });
+      const ze = pans.map((p, k) => (p.cells.length ? quantile(p.cells.map(([x, y]) => zOf(k, x, y)), 0.03) : NaN));
+      const ordre = ze.map((_, k) => k).filter((k) => Number.isFinite(ze[k])).sort((i, j) => ze[i] - ze[j]);
+      let groupe = [];
+      const niveler = () => {
+        if (groupe.length >= 2) {
+          const m = groupe.reduce((t, k) => t + ze[k], 0) / groupe.length;
+          for (const k of groupe) PL[k].c += m - ze[k];
+        }
+        groupe = [];
+      };
+      for (const k of ordre) { if (groupe.length && ze[k] - ze[groupe[0]] > 0.4) niveler(); groupe.push(k); }
+      niveler();
+    }
+
     // Grille des étiquettes (indices globaux : maille gx couvre [gx*cs, (gx+1)*cs]).
     const lab = new Map();
     const K = (i, j) => i + ',' + j;
@@ -902,7 +954,7 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
       return best || w;
     };
 
-    const faces = [], lignes = [];
+    const faces2d = [];
     pans.forEach((p, k) => {
       const brut = contour(k);
       if (brut.length < 4) return;
@@ -932,7 +984,56 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         if (!last || Math.hypot(w[0] - last[0], w[1] - last[1]) > 0.1) pts.push(w);
       }
       while (pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 0.1) pts.pop();
-      if (pts.length < 3) return;
+      if (pts.length >= 3) faces2d.push({ pan: k, pts });
+    });
+
+    // Soudure : un coin partagé par plusieurs pans doit être UN seul point,
+    // sinon les pans et les murs laissent des fentes entre eux.
+    {
+      const V = [];
+      faces2d.forEach((f, fi) => f.pts.forEach((q, vi) => V.push({ fi, vi, x: q[0], y: q[1], k: f.pan })));
+      const par = V.map((_, i) => i);
+      const find = (i) => (par[i] === i ? i : (par[i] = find(par[i])));
+      const G = new Map();
+      V.forEach((v, i) => { const kk = Math.floor(v.x / 0.5) + ',' + Math.floor(v.y / 0.5); if (!G.has(kk)) G.set(kk, []); G.get(kk).push(i); });
+      V.forEach((v, i) => {
+        const gx = Math.floor(v.x / 0.5), gy = Math.floor(v.y / 0.5);
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+          for (const j of G.get((gx + dx) + ',' + (gy + dy)) || []) {
+            if (j <= i || V[j].k === v.k) continue; // on ne soude que des pans différents
+            if (Math.hypot(V[j].x - v.x, V[j].y - v.y) < 0.45) par[find(i)] = find(j);
+          }
+        }
+      });
+      const grappes = new Map();
+      V.forEach((v, i) => { const r = find(i); if (!grappes.has(r)) grappes.set(r, []); grappes.get(r).push(i); });
+      for (const ids of grappes.values()) {
+        if (ids.length < 2) continue;
+        const ks = [...new Set(ids.map((i) => V[i].k))];
+        let w = [ids.reduce((t, i) => t + V[i].x, 0) / ids.length, ids.reduce((t, i) => t + V[i].y, 0) / ids.length];
+        const s = projSeg(w), auBord = s && Math.hypot(s.q[0] - w[0], s.q[1] - w[1]) < 0.35;
+        if (ks.length >= 3) {
+          const x = inter3(ks[0], ks[1], ks[2]);
+          if (x && Math.hypot(x[0] - w[0], x[1] - w[1]) < 1.0) w = x;
+        } else if (ks.length === 2) {
+          const L = ligne(ks[0], ks[1]);
+          const x = auBord ? interLigneSeg(L, s) : projLigne(w, L);
+          if (x && Math.hypot(x[0] - w[0], x[1] - w[1]) < 1.0) w = x;
+        }
+        for (const i of ids) faces2d[V[i].fi].pts[V[i].vi] = w;
+      }
+    }
+
+    const faces = [], lignes = [];
+    for (const f2 of faces2d) {
+      const k = f2.pan;
+      const pts = [];
+      for (const w of f2.pts) {
+        const last = pts[pts.length - 1];
+        if (!last || Math.hypot(w[0] - last[0], w[1] - last[1]) > 0.05) pts.push(w);
+      }
+      while (pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 0.05) pts.pop();
+      if (pts.length < 3) continue;
       const p3 = pts.map(([x, y]) => [x, y, zOf(k, x, y)]);
       faces.push({ pan: k, pts: p3 });
 
@@ -954,7 +1055,7 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         } else type = horizontale ? 'egout' : 'rive';
         lignes.push({ type, a, b, long, paire, pan: k });
       }
-    });
+    }
 
     // Une arête intérieure est vue par ses deux pans, parfois en plusieurs tronçons :
     // pour chaque paire de pans, on projette tous les tronçons sur leur droite
@@ -1225,6 +1326,48 @@ async function buildingsAround(x, y, r) {
   return (j.features || []).filter((f) => f.geometry).map((f) => ({
     id: f.id, geom: f.geometry, polys: EV3.toPolygons(f.geometry), props: f.properties,
   }));
+}
+
+// Parcelle cadastrale qui contient le point (pour savoir quelle maison est la sienne).
+async function parcelleAt(x, y) {
+  try {
+    const p = new URLSearchParams({ SERVICE: 'WFS', VERSION: '2.0.0', REQUEST: 'GetFeature', TYPENAMES: 'CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle', SRSNAME: 'EPSG:2154', OUTPUTFORMAT: 'application/json', COUNT: '6', BBOX: bboxParam({ minX: x - 1, minY: y - 1, maxX: x + 1, maxY: y + 1 }) });
+    const r = await fetch(`${GEOPF}/wfs/ows?${p}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    for (const f of j.features || []) {
+      if (!f.geometry) continue;
+      const polys = EV3.toPolygons(f.geometry);
+      if (EV3.inPolygons(x, y, polys)) return polys;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// Même règle que la fiche de métré : le bâtiment demandé par son identifiant,
+// sinon celui qui contient le point, puis celui posé sur la parcelle, puis le
+// plus grand bâtiment habitable, puis le plus proche.
+function choisirBatiment(bats, x, y, parc, cible) {
+  if (cible) {
+    const b = bats.find((v) => v.props && v.props.cleabs === cible);
+    if (b) return b;
+  }
+  const habitable = (b) => /résidentiel|habitation|indifférenci/i.test((b.props && (b.props.usage_1 || b.props.nature)) || '');
+  let best = null, bs = -Infinity;
+  for (const b of bats) {
+    const aire = EV3.polygonsArea(b.polys);
+    if (aire < 8) continue;
+    const contient = EV3.inPolygons(x, y, b.polys) ? 1 : 0;
+    let sur = 0;
+    if (parc) {
+      let n = 0, t = 0;
+      for (const rings of b.polys) for (const [px, py] of rings[0]) { t++; if (EV3.inPolygons(px, py, parc)) n++; }
+      sur = t ? n / t : 0;
+    }
+    const sc = contient * 100000 + sur * 1000 + Math.min(300, aire) * (habitable(b) ? 2.2 : 1) - distToPolys(x, y, b.polys) * 4;
+    if (sc > bs) { bs = sc; best = b; }
+  }
+  return best;
 }
 
 function distToPolys(x, y, polys) {
@@ -1602,7 +1745,7 @@ renderer.domElement.addEventListener('pointerup', (e) => {
 });
 
 // ------------------------------------------------------------------ pipeline
-async function run(q) {
+async function run(q, cible) {
   if (S.busy) return;
   S.busy = true; $('go').disabled = true;
   try {
@@ -1610,9 +1753,10 @@ async function run(q) {
     const g = await geocode(q);
     const [x, y] = toL93(g.lon, g.lat);
     status('Recherche du bâtiment…');
-    const bats = await buildingsAround(x, y, 45);
+    const [bats, parc] = await Promise.all([buildingsAround(x, y, 45), parcelleAt(x, y)]);
     if (!bats.length) throw new UserError('Aucun bâtiment BD TOPO à cet endroit.');
-    const bat = bats.map((b) => ({ b, d: distToPolys(x, y, b.polys) })).sort((a, c) => a.d - c.d)[0].b;
+    const bat = choisirBatiment(bats, x, y, parc, cible);
+    if (!bat) throw new UserError('Aucun bâtiment exploitable à cet endroit.');
     S.bats = bats;
     await selectBuilding(bat, g.label, true);
   } catch (e) {
@@ -1762,9 +1906,9 @@ q.addEventListener('input', () => {
 q.addEventListener('blur', () => setTimeout(() => { sugg.hidden = true; }, 150));
 $('form').addEventListener('submit', (e) => { e.preventDefault(); sugg.hidden = true; if (q.value.trim()) run(q.value); });
 
-// Lien direct : page.html#49.3312,-0.4221
+// Lien direct : 3d.html#49.3312,-0.4221 ou, depuis la fiche, 3d.html#49.3312,-0.4221;BATIMENT000…
 const h = decodeURIComponent(location.hash.slice(1));
-if (h) { q.value = h; run(h); }
+if (h) { const [coords, cible] = h.split(';'); q.value = coords; run(coords, cible); }
 </script>
 </body>
 </html>
