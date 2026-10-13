@@ -925,6 +925,14 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
       if (Math.abs(det) < 1e-9) return null;
       return [(-L1.C * L2.B + L2.C * L1.B) / det, (-L1.A * L2.C + L2.A * L1.C) / det];
     };
+    // Deux pans de même orientation et même pente ne se croisent pas : entre eux
+    // il y a un ressaut (un pan plus haut que l'autre), pas une arête.
+    const parallele = (k, o) => {
+      const n1 = [-PL[k].a, -PL[k].b, 1], n2 = [-PL[o].a, -PL[o].b, 1];
+      const c = (n1[0] * n2[0] + n1[1] * n2[1] + 1) / (Math.hypot(...n1) * Math.hypot(...n2));
+      return c > Math.cos((4 * Math.PI) / 180);
+    };
+    const proche = (p, q, r) => p && Math.hypot(p[0] - q[0], p[1] - q[1]) < r;
 
     // Points où trois pans se rencontrent (bout de faîtage, pied de noue…) :
     // repérés sur la grille, placés exactement à l'intersection des trois plans.
@@ -936,6 +944,7 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         const s3 = new Set([at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1), at(i + 2, j), at(i, j + 2), at(i + 2, j + 1), at(i + 1, j + 2), at(i + 2, j + 2)]);
         const ls = [...s3].filter((l) => l >= 0).sort((x, y) => x - y);
         if (ls.length !== 3) continue;
+        if (parallele(ls[0], ls[1]) || parallele(ls[0], ls[2]) || parallele(ls[1], ls[2])) continue;
         const cle = ls.join('-');
         if (vus.has(cle)) continue;
         vus.add(cle);
@@ -964,18 +973,19 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         // étiquettes autour du sommet (rayon 2 mailles)
         const gi = Math.round(v[0] / cs), gj = Math.round(v[1] / cs), cnt = new Map();
         for (let di = -2; di < 2; di++) for (let dj = -2; dj < 2; dj++) { const l = at(gi + di, gj + dj); cnt.set(l, (cnt.get(l) || 0) + 1); }
-        const autres = [...cnt.entries()].filter(([l]) => l !== k && l >= 0).sort((a, b) => b[1] - a[1]).map(([l]) => l);
+        const autres = [...cnt.entries()].filter(([l]) => l !== k && l >= 0 && !parallele(k, l)).sort((a, b) => b[1] - a[1]).map(([l]) => l);
         const dehors = cnt.has(-1);
         let w = v;
         if (autres.length >= 2) {
           const x = inter3(k, autres[0], autres[1]);
-          w = x && Math.hypot(x[0] - v[0], x[1] - v[1]) < 1.5 ? x : projLigne(v, ligne(k, autres[0]));
+          if (proche(x, v, 1.5)) w = x;
+          else { const y = projLigne(v, ligne(k, autres[0])); if (proche(y, v, 1.5)) w = y; }
         } else if (autres.length === 1 && dehors) {
           const s = projSeg(v), x = s && interLigneSeg(ligne(k, autres[0]), s);
-          w = x && Math.hypot(x[0] - v[0], x[1] - v[1]) < 1.5 ? x : (s ? s.q : v);
+          w = proche(x, v, 1.5) ? x : (s && proche(s.q, v, 1.0) ? s.q : v);
         } else if (autres.length === 1) {
           const x = projLigne(v, ligne(k, autres[0]));
-          w = Math.hypot(x[0] - v[0], x[1] - v[1]) < 1.5 ? x : v;
+          if (proche(x, v, 1.5)) w = x;
         } else if (dehors) {
           const s = projSeg(v); if (s && Math.hypot(s.q[0] - v[0], s.q[1] - v[1]) < 1.0) w = s.q;
         }
@@ -1012,7 +1022,11 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         const ks = [...new Set(ids.map((i) => V[i].k))];
         let w = [ids.reduce((t, i) => t + V[i].x, 0) / ids.length, ids.reduce((t, i) => t + V[i].y, 0) / ids.length];
         const s = projSeg(w), auBord = s && Math.hypot(s.q[0] - w[0], s.q[1] - w[1]) < 0.35;
-        if (ks.length >= 3) {
+        const ksNP = ks.filter((a, i) => ks.every((b, j) => i === j || !parallele(a, b)));
+        if (ksNP.length < ks.length) {
+          // ressaut entre pans parallèles : on garde la moyenne, calée sur le contour si on y est
+          if (auBord) w = s.q;
+        } else if (ks.length >= 3) {
           const x = inter3(ks[0], ks[1], ks[2]);
           if (x && Math.hypot(x[0] - w[0], x[1] - w[1]) < 1.0) w = x;
         } else if (ks.length === 2) {
@@ -1047,7 +1061,13 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         const long = Math.hypot(l2, b[2] - a[2]);
         const horizontale = Math.abs(b[2] - a[2]) / l2 < Math.tan((8 * Math.PI) / 180);
         let type, paire = null;
-        if (o >= 0 && o !== k) {
+        if (o >= 0 && o !== k && parallele(k, o)) {
+          // ressaut : on ne garde que le bord du pan le plus haut (son égout, ou sa rive)
+          const mx2 = (a[0] + b[0]) / 2, my2 = (a[1] + b[1]) / 2;
+          if (zOf(k, mx2, my2) < zOf(o, mx2, my2)) continue;
+          type = horizontale ? 'egout' : 'rive';
+          paire = Math.min(k, o) + '-' + Math.max(k, o);
+        } else if (o >= 0 && o !== k) {
           const ix = (a[0] + b[0]) / 2 - (dy / l2) * 0.5, iy = (a[1] + b[1]) / 2 + (dx / l2) * 0.5;
           const convexe = zOf(k, ix, iy) < zOf(o, ix, iy);
           type = convexe ? (horizontale ? 'faitage' : 'arretier') : 'noue';
