@@ -592,9 +592,16 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
       let inl = vivants.filter((i) => distToPlane(best, P.x[i], P.y[i], P.z[i]) < o.seuil);
       if (inl.length < 3) { echecs++; continue; }
       let pl = fitPlane(P, inl);
+      // Affinage en deux temps. Au premier, on serre la tolérance : un plan
+      // « de compromis » posé entre deux pans parallèles décalés d'un ressaut
+      // n'y garde qu'une bande de chaque côté, séparées par un trou ; la plus
+      // grande composante connexe ne retient alors qu'un seul côté, et le
+      // réajustement retombe sur le vrai pan. Au second, tolérance normale.
       for (let pass = 0; pass < 2; pass++) {
-        inl = vivants.filter((i) => distToPlane(pl, P.x[i], P.y[i], P.z[i]) < o.seuil);
-        inl = largestComponent(P, inl, o.celluleConnexe);
+        const tol = pass === 0 ? o.seuil * 0.6 : o.seuil;
+        let cand = vivants.filter((i) => distToPlane(pl, P.x[i], P.y[i], P.z[i]) < tol);
+        if (pass === 0 && cand.length < Math.max(minPts, 30)) cand = vivants.filter((i) => distToPlane(pl, P.x[i], P.y[i], P.z[i]) < o.seuil);
+        inl = largestComponent(P, cand, o.celluleConnexe);
         if (inl.length < 3) break;
         pl = fitPlane(P, inl);
       }
@@ -745,55 +752,199 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
     return { hull, ratio: aire ? ringArea(hull.concat([hull[0]])) / aire : Infinity };
   }
 
+  /** Axe principal du bâtiment (en degrés, dans [0, 90[), d'après ses murs. */
+  function axeBatiment(segs) {
+    const hist = new Float64Array(90);
+    for (const [a, b] of segs) {
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 0.5) continue;
+      const d = ((((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) % 90) + 90) % 90;
+      for (let t = -3; t <= 3; t++) hist[(Math.round(d) + t + 90) % 90] += L * (1 - Math.abs(t) / 4);
+    }
+    let th0 = 0;
+    for (let i = 1; i < 90; i++) if (hist[i] > hist[th0]) th0 = i;
+    // angle fin : moyenne pondérée des murs à moins de 4° de l'axe trouvé
+    let sw = 0, sa = 0;
+    for (const [a, b] of segs) {
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const d = ((((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) % 90) + 90) % 90;
+      let e = d - th0; if (e > 45) e -= 90; if (e < -45) e += 90;
+      if (Math.abs(e) <= 4) { sw += L; sa += L * e; }
+    }
+    return th0 + (sw ? sa / sw : 0);
+  }
+
+  /**
+   * Remet un contour au carré, comme le ferait un dessinateur.
+   *
+   * Les murs à moins de 10° d'un axe du bâtiment sont alignés dessus ; les
+   * micro-arêtes (< 60 cm) et les décrochements de moins de 45 cm sont effacés ;
+   * un raccord court et de biais entre deux murs parallèles devient un
+   * décrochement à angle droit ; chaque sommet est recalculé à l'intersection
+   * de ses deux murs. Un mur franchement oblique est gardé tel quel. Si le
+   * résultat est bancal (aire qui bouge de plus de 15 %, mur retourné, contour
+   * qui se recoupe), on garde l'original.
+   */
+  function regulariserContour(polys, axe, opt = {}) {
+    const TOL = Math.cos(((opt.tol ?? 10) * Math.PI) / 180);
+    const LMIN = opt.lmin ?? 0.6, JOG = opt.jog ?? 2.5, DMIN = opt.dmin ?? 0.45;
+    const r = (axe * Math.PI) / 180;
+    const AX = [[Math.cos(r), Math.sin(r)], [-Math.sin(r), Math.cos(r)]];
+
+    const anneau = (ring) => {
+      const pts = ring.map((q) => [q[0], q[1]]);
+      if (pts.length > 1 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 1e-9) pts.pop();
+      const n0 = pts.length;
+      if (n0 < 4) return null;
+      let aire2 = 0;
+      for (let i = 0; i < n0; i++) { const p = pts[i], q = pts[(i + 1) % n0]; aire2 += p[0] * q[1] - q[0] * p[1]; }
+      const horaire = aire2 < 0;
+      if (horaire) pts.reverse(); // on travaille en sens trigonométrique
+      const aire0 = Math.abs(aire2) / 2;
+
+      const mkEdge = (a, b) => {
+        const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1e-9;
+        let dir = [dx / len, dy / len], cls = -1;
+        for (let c = 0; c < 2; c++) {
+          const dot = dir[0] * AX[c][0] + dir[1] * AX[c][1];
+          if (Math.abs(dot) >= TOL) { cls = c; dir = dot > 0 ? AX[c] : [-AX[c][0], -AX[c][1]]; break; }
+        }
+        return { mid: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], dir, cls, len, keep: false };
+      };
+      const E = pts.map((p, i) => mkEdge(p, pts[(i + 1) % n0]));
+      const offset = (e1, e2) => Math.abs(e1.dir[0] * (e2.mid[1] - e1.mid[1]) - e1.dir[1] * (e2.mid[0] - e1.mid[0]));
+      const dot = (e1, e2) => e1.dir[0] * e2.dir[0] + e1.dir[1] * e2.dir[1];
+      const paralleles = (e1, e2) => Math.abs(dot(e1, e2)) > Math.cos((3 * Math.PI) / 180);
+      const raccord = (e, versMid, mid, len) => {
+        const nd = [-e.dir[1], e.dir[0]];
+        const s = Math.sign(nd[0] * (versMid[0] - e.mid[0]) + nd[1] * (versMid[1] - e.mid[1])) || 1;
+        return { mid, dir: [nd[0] * s, nd[1] * s], cls: e.cls >= 0 ? 1 - e.cls : -1, len, keep: true };
+      };
+
+      for (let pass = 0; pass < 40; pass++) {
+        const n = E.length;
+        if (n < 3) return null;
+        let changed = false;
+        // 1. micro-arêtes : on les retire, le sommet se reconstruit à l'intersection des voisins
+        for (let i = 0; i < n && !changed; i++) {
+          if (!E[i].keep && E[i].len < LMIN) { E.splice(i, 1); changed = true; }
+        }
+        if (changed) continue;
+        // 2. raccord court et de biais entre deux murs parallèles
+        for (let i = 0; i < n && !changed; i++) {
+          const e = E[i], p = E[(i - 1 + n) % n], q = E[(i + 1) % n];
+          if (e.keep || e.cls >= 0 || e.len >= JOG || !paralleles(p, q) || dot(p, q) < 0) continue;
+          const d = offset(p, q);
+          if (d < DMIN) E.splice(i, 1);
+          else E[i] = raccord(p, q.mid, e.mid, d);
+          changed = true;
+        }
+        if (changed) continue;
+        // 3. deux murs consécutifs parallèles : même ligne → un seul mur ; sinon → décrochement à angle droit
+        for (let i = 0; i < n && !changed; i++) {
+          const e = E[i], q = E[(i + 1) % n];
+          if (!paralleles(e, q)) continue;
+          const d = offset(e, q);
+          if (d < DMIN && dot(e, q) > 0) {
+            const L = e.len + q.len;
+            E[i] = { mid: [(e.mid[0] * e.len + q.mid[0] * q.len) / L, (e.mid[1] * e.len + q.mid[1] * q.len) / L], dir: e.dir, cls: e.cls, len: L, keep: e.keep || q.keep };
+            E.splice((i + 1) % n, 1);
+          } else {
+            const j = [e.mid[0] + (e.dir[0] * e.len) / 2, e.mid[1] + (e.dir[1] * e.len) / 2];
+            E.splice(i + 1, 0, raccord(e, q.mid, j, Math.max(d, 0.05)));
+          }
+          changed = true;
+        }
+        if (!changed) break;
+      }
+
+      // Sommets : intersection de deux murs consécutifs
+      const n = E.length;
+      if (n < 3) return null;
+      const V = [];
+      for (let i = 0; i < n; i++) {
+        const e1 = E[(i - 1 + n) % n], e2 = E[i];
+        const det = e1.dir[0] * e2.dir[1] - e1.dir[1] * e2.dir[0];
+        if (Math.abs(det) < 1e-6) return null;
+        const rx = e2.mid[0] - e1.mid[0], ry = e2.mid[1] - e1.mid[1];
+        const t = (rx * e2.dir[1] - ry * e2.dir[0]) / det;
+        V.push([e1.mid[0] + t * e1.dir[0], e1.mid[1] + t * e1.dir[1]]);
+      }
+      // Contrôles : aucun mur retourné, aire conservée, contour simple
+      let aire = 0;
+      for (let i = 0; i < n; i++) {
+        const a = V[i], b = V[(i + 1) % n];
+        if ((b[0] - a[0]) * E[i].dir[0] + (b[1] - a[1]) * E[i].dir[1] < 0.05) return null;
+        aire += a[0] * b[1] - b[0] * a[1];
+      }
+      aire = Math.abs(aire) / 2;
+      if (aire < aire0 * 0.85 || aire > aire0 * 1.15) return null;
+      const croise = (p1, p2, p3, p4) => {
+        const d = (p2[0] - p1[0]) * (p4[1] - p3[1]) - (p2[1] - p1[1]) * (p4[0] - p3[0]);
+        if (Math.abs(d) < 1e-12) return false;
+        const u = ((p3[0] - p1[0]) * (p4[1] - p3[1]) - (p3[1] - p1[1]) * (p4[0] - p3[0])) / d;
+        const v = ((p3[0] - p1[0]) * (p2[1] - p1[1]) - (p3[1] - p1[1]) * (p2[0] - p1[0])) / d;
+        return u > 1e-6 && u < 1 - 1e-6 && v > 1e-6 && v < 1 - 1e-6;
+      };
+      for (let i = 0; i < n; i++) for (let j = i + 2; j < n; j++) {
+        if (i === 0 && j === n - 1) continue;
+        if (croise(V[i], V[(i + 1) % n], V[j], V[(j + 1) % n])) return null;
+      }
+      if (horaire) V.reverse();
+      V.push([V[0][0], V[0][1]]);
+      return V;
+    };
+
+    return polys.map((rings) => rings.map((ring) => anneau(ring) || ring.map((q) => [q[0], q[1]])));
+  }
+
   /**
    * Maquette propre du toit : un polygone plat par pan, bordé par les vraies
    * arêtes (intersections de plans) et par le contour du bâtiment.
    *
    * Méthode « plans d'abord » : le partage des mailles entre pans (issu des
    * points) dit QUI occupe QUOI ; les plans disent OÙ passent les arêtes.
-   * On trace le contour de chaque pan sur la grille, on le simplifie, puis on
-   * cale chaque sommet : sur l'arête entre deux pans (intersection de leurs
-   * plans), sur le point de rencontre de trois pans, ou sur le contour du
-   * bâtiment. Les arêtes se typent ensuite toutes seules :
-   * convexe + horizontale = faîtage, convexe + pentue = arêtier, concave = noue ;
-   * sur le contour : horizontale = égout, pentue = rive.
+   * Le contour est d'abord remis au carré. On trace le contour de chaque pan
+   * sur la grille, on le simplifie, puis on cale chaque sommet : sur l'arête
+   * entre deux pans (intersection de leurs plans), sur le point de rencontre
+   * de trois pans, sur la ligne d'un ressaut, ou sur le contour du bâtiment.
+   * Les arêtes se typent ensuite toutes seules : convexe + horizontale =
+   * faîtage, convexe + pentue = arêtier, concave = noue ; sur le contour :
+   * horizontale = égout, pentue = rive.
    */
   function modeleToit(res, geom) {
     const cs = res.maille;
-    const polys = toPolygons(geom);
     const pans = res.pans;
+    const polysBrut = toPolygons(geom);
+    const segsBrut = [];
+    for (const rings of polysBrut) for (const r of rings) for (let i = 1; i < r.length; i++) segsBrut.push([r[i - 1], r[i]]);
+    const axe = axeBatiment(segsBrut);
+    // Contour remis au carré : c'est lui qui borde les pans et porte les murs.
+    const polys = regulariserContour(polysBrut, axe);
+    const segs = [];
+    for (const rings of polys) for (const r of rings) for (let i = 1; i < r.length; i++) segs.push([r[i - 1], r[i]]);
+    const emprise = polygonsArea(polys) || res.emprise;
+
     const PL = pans.map((p) => {
       const [nx, ny, nz] = p.plane.n, [cx, cy, cz] = p.plane.c;
       return { a: -nx / nz, b: -ny / nz, c: cz + (nx * cx + ny * cy) / nz };
     });
     const zOf = (k, x, y) => PL[k].a * x + PL[k].b * y + PL[k].c;
-    const segs = [];
-    for (const rings of polys) for (const r of rings) for (let i = 1; i < r.length; i++) segs.push([r[i - 1], r[i]]);
+    // Deux pans de même orientation et même pente ne se croisent pas : entre eux
+    // il y a un ressaut (un pan plus haut que l'autre), pas une arête.
+    const parallele = (k, o) => {
+      const n1 = [-PL[k].a, -PL[k].b, 1], n2 = [-PL[o].a, -PL[o].b, 1];
+      const c = (n1[0] * n2[0] + n1[1] * n2[1] + 1) / (Math.hypot(...n1) * Math.hypot(...n2));
+      return c > Math.cos((4 * Math.PI) / 180);
+    };
 
-    // Régularisation : un vrai toit a ses pans d'équerre avec les murs et ses
-    // égouts de niveau. Le LiDAR donne chaque pan à ± quelques degrés près ; ces
-    // écarts font pencher le bas du toit. On cale donc l'orientation de chaque
-    // pan sur les axes du bâtiment (si l'écart est < 12°), puis on met à la même
-    // hauteur les égouts qui sont à moins de 40 cm les uns des autres.
+    // Régularisation des plans : un vrai toit a ses pans d'équerre avec les murs
+    // et ses égouts de niveau. Le LiDAR donne chaque pan à ± quelques degrés
+    // près ; ces écarts font pencher le bas du toit. On cale donc l'orientation
+    // de chaque pan sur les axes du bâtiment (si l'écart est < 12°), puis on met
+    // à la même hauteur les égouts à moins de 40 cm les uns des autres — sauf
+    // entre deux pans parallèles, dont l'écart est justement le ressaut.
     {
-      const hist = new Float64Array(90);
-      for (const [a, b] of segs) {
-        const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
-        if (L < 0.5) continue;
-        const d = ((((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) % 90) + 90) % 90;
-        for (let t = -3; t <= 3; t++) hist[(Math.round(d) + t + 90) % 90] += L * (1 - Math.abs(t) / 4);
-      }
-      let th0 = 0;
-      for (let i = 1; i < 90; i++) if (hist[i] > hist[th0]) th0 = i;
-      // angle fin : moyenne pondérée des murs à moins de 4° de l'axe trouvé
-      let sw = 0, sa = 0;
-      for (const [a, b] of segs) {
-        const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
-        const d = ((((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI) % 90) + 90) % 90;
-        let e = d - th0; if (e > 45) e -= 90; if (e < -45) e += 90;
-        if (Math.abs(e) <= 4) { sw += L; sa += L * e; }
-      }
-      const axe = th0 + (sw ? sa / sw : 0);
       pans.forEach((p, k) => {
         const [nx, ny, nz] = p.plane.n, h = Math.hypot(nx, ny);
         if (h < 0.05) return; // toit plat : rien à orienter
@@ -818,11 +969,17 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         }
         groupe = [];
       };
-      for (const k of ordre) { if (groupe.length && ze[k] - ze[groupe[0]] > 0.4) niveler(); groupe.push(k); }
+      for (const k of ordre) {
+        if (groupe.length && ze[k] - ze[groupe[0]] > 0.4) niveler();
+        if (groupe.some((g) => parallele(g, k))) continue;
+        groupe.push(k);
+      }
       niveler();
     }
 
     // Grille des étiquettes (indices globaux : maille gx couvre [gx*cs, (gx+1)*cs]).
+    // Toute la construction dépend des plans PL : on la rejoue après avoir remis les égouts à niveau.
+    const construire = () => {
     const lab = new Map();
     const K = (i, j) => i + ',' + j;
     pans.forEach((p, k) => { for (const [x, y] of p.cells) lab.set(K(Math.floor(x / cs), Math.floor(y / cs)), k); });
@@ -920,19 +1077,86 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
       if (t < -0.25 || t > 1.25) return null;
       return [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
     };
-    const inter3 = (k, o, q) => {
-      const L1 = ligne(k, o), L2 = ligne(k, q), det = L1.A * L2.B - L2.A * L1.B;
+    const interLignes = (L1, L2) => {
+      const det = L1.A * L2.B - L2.A * L1.B;
       if (Math.abs(det) < 1e-9) return null;
       return [(-L1.C * L2.B + L2.C * L1.B) / det, (-L1.A * L2.C + L2.A * L1.C) / det];
     };
-    // Deux pans de même orientation et même pente ne se croisent pas : entre eux
-    // il y a un ressaut (un pan plus haut que l'autre), pas une arête.
-    const parallele = (k, o) => {
-      const n1 = [-PL[k].a, -PL[k].b, 1], n2 = [-PL[o].a, -PL[o].b, 1];
-      const c = (n1[0] * n2[0] + n1[1] * n2[1] + 1) / (Math.hypot(...n1) * Math.hypot(...n2));
-      return c > Math.cos((4 * Math.PI) / 180);
-    };
+    const inter3 = (k, o, q) => interLignes(ligne(k, o), ligne(k, q));
     const proche = (p, q, r) => p && Math.hypot(p[0] - q[0], p[1] - q[1]) < r;
+    const ligneSeg = (sg) => { const A = sg.b[1] - sg.a[1], B = -(sg.b[0] - sg.a[0]), n = Math.hypot(A, B) || 1e-12; return { A: A / n, B: B / n, C: -(A * sg.a[0] + B * sg.a[1]) / n }; };
+    const coins = [];
+    for (const rings of polys) for (const r of rings) for (let i = 0; i + 1 < r.length; i++) coins.push([r[i][0], r[i][1]]);
+    const coinProche = (p, rmax) => { let best = null, bd = rmax; for (const c of coins) { const d = Math.hypot(c[0] - p[0], c[1] - p[1]); if (d < bd) { bd = d; best = c; } } return best; };
+    // Segment du contour que longe l'arête (v, w) : celui le plus proche de son milieu
+    const segLeLong = (v, w) => projSeg([(v[0] + w[0]) / 2, (v[1] + w[1]) / 2]);
+    // Projection d'un point sur un segment (bornée aux extrémités)
+    const projSurSeg = (p, sg) => {
+      const dx = sg.b[0] - sg.a[0], dy = sg.b[1] - sg.a[1], l2 = dx * dx + dy * dy || 1e-12;
+      const t = Math.max(0, Math.min(1, ((p[0] - sg.a[0]) * dx + (p[1] - sg.a[1]) * dy) / l2));
+      return [sg.a[0] + t * dx, sg.a[1] + t * dy];
+    };
+    // À droite de l'arête (v, w), est-on hors du bâtiment ?
+    const dehorsADroite = (v, w) => {
+      const dx = w[0] - v[0], dy = w[1] - v[1], L = Math.hypot(dx, dy) || 1;
+      return at(Math.floor(((v[0] + w[0]) / 2 + (dy / L) * 0.35) / cs), Math.floor(((v[1] + w[1]) / 2 - (dx / L) * 0.35) / cs)) < 0;
+    };
+
+    // Ressauts : la limite entre deux pans parallèles est une droite, calée sur
+    // un axe du bâtiment quand elle en est proche. On la lit sur la grille.
+    const steps = new Map();
+    const stepOf = (a, b) => steps.get(Math.min(a, b) + '-' + Math.max(a, b));
+    const distStep = (S, p) => Math.abs(S.A * p[0] + S.B * p[1] + S.C);
+    // Ressaut du pan k passant à moins de `r` du point p (le bord d'un pan est
+    // souvent déchiqueté près d'un ressaut : les étiquettes voisines ne suffisent pas)
+    const stepProche = (k, p, r) => {
+      let best = null, bd = r;
+      for (const [key, S] of steps) {
+        const [u, v] = key.split('-').map(Number);
+        if (u !== k && v !== k) continue;
+        const d = distStep(S, p);
+        if (d < bd) { bd = d; best = S; }
+      }
+      return best;
+    };
+    const surUnStep = (p) => { for (const S of steps.values()) if (distStep(S, p) < 0.05) return true; return false; };
+    {
+      const bords = new Map();
+      for (const [kk, k] of lab) {
+        const [i, j] = kk.split(',').map(Number);
+        for (const [di, dj] of [[1, 0], [0, 1]]) {
+          const o = at(i + di, j + dj);
+          if (o < 0 || o === k || !parallele(k, o)) continue;
+          const key = Math.min(k, o) + '-' + Math.max(k, o);
+          if (!bords.has(key)) bords.set(key, []);
+          bords.get(key).push([(i + 0.5 + di / 2) * cs, (j + 0.5 + dj / 2) * cs]);
+        }
+      }
+      const r = (axe * Math.PI) / 180;
+      for (const [key, pts] of bords) {
+        if (pts.length * cs < 1.0) continue;
+        let mx = 0, my = 0;
+        for (const p of pts) { mx += p[0]; my += p[1]; }
+        mx /= pts.length; my /= pts.length;
+        let sxx = 0, sxy = 0, syy = 0;
+        for (const p of pts) { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; sxy += dx * dy; syy += dy * dy; }
+        const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+        let d = [Math.cos(ang), Math.sin(ang)];
+        for (const c of [[Math.cos(r), Math.sin(r)], [-Math.sin(r), Math.cos(r)]]) {
+          const dot = d[0] * c[0] + d[1] * c[1];
+          if (Math.abs(dot) > Math.cos((10 * Math.PI) / 180)) { d = dot > 0 ? c : [-c[0], -c[1]]; break; }
+        }
+        steps.set(key, { A: -d[1], B: d[0], C: d[1] * mx - d[0] * my });
+      }
+    }
+    const surUnRessautDe = (o, a, b) => {
+      for (const [key, S] of steps) {
+        const [u, v] = key.split('-').map(Number);
+        if (u !== o && v !== o) continue;
+        if (Math.abs(S.A * a[0] + S.B * a[1] + S.C) < 0.05 && Math.abs(S.A * b[0] + S.B * b[1] + S.C) < 0.05) return true;
+      }
+      return false;
+    };
 
     // Points où trois pans se rencontrent (bout de faîtage, pied de noue…) :
     // repérés sur la grille, placés exactement à l'intersection des trois plans.
@@ -968,37 +1192,111 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
       const brut = contour(k);
       if (brut.length < 4) return;
       const simp = simplifier(brut, 0.45);
+      // Là où l'arête de k longe le ressaut de deux autres pans, la simplification
+      // a effacé le décrochement : on remet un sommet au croisement avec le ressaut.
+      for (const [key, S] of steps) {
+        const [a, b] = key.split('-').map(Number);
+        if (a === k || b === k) continue;
+        for (let i = 0; i < simp.length; i++) {
+          const p0 = simp[i], q0 = simp[(i + 1) % simp.length];
+          const fp = S.A * p0[0] + S.B * p0[1] + S.C, fq = S.A * q0[0] + S.B * q0[1] + S.C;
+          if (fp * fq >= 0) continue;
+          const t = fp / (fp - fq), c = [p0[0] + t * (q0[0] - p0[0]), p0[1] + t * (q0[1] - p0[1])];
+          const dx = q0[0] - p0[0], dy = q0[1] - p0[1], L = Math.hypot(dx, dy) || 1;
+          const ech = (s) => at(Math.floor((c[0] + (dx / L) * s + (dy / L) * 0.35) / cs), Math.floor((c[1] + (dy / L) * s - (dx / L) * 0.35) / cs));
+          const s1 = ech(-0.5), s2 = ech(0.5);
+          if (!((s1 === a && s2 === b) || (s1 === b && s2 === a))) continue;
+          simp.splice(i + 1, 0, c); i++;
+        }
+      }
       const pts = [];
-      for (const v of simp) {
+      const pousser = (w) => { const last = pts[pts.length - 1]; if (!last || Math.hypot(w[0] - last[0], w[1] - last[1]) > 0.1) pts.push(w); };
+      for (let vi = 0; vi < simp.length; vi++) {
+        const v = simp[vi], vPrev = simp[(vi - 1 + simp.length) % simp.length], vNext = simp[(vi + 1) % simp.length];
+        // mur longé par l'arête qui arrive et par celle qui part (quand elles sont au bord)
+        const murAvant = dehorsADroite(vPrev, v) ? segLeLong(vPrev, v) : null;
+        const murApres = dehorsADroite(v, vNext) ? segLeLong(v, vNext) : null;
+        const mur = murApres || murAvant;
         // étiquettes autour du sommet (rayon 2 mailles)
         const gi = Math.round(v[0] / cs), gj = Math.round(v[1] / cs), cnt = new Map();
         for (let di = -2; di < 2; di++) for (let dj = -2; dj < 2; dj++) { const l = at(gi + di, gj + dj); cnt.set(l, (cnt.get(l) || 0) + 1); }
-        const autres = [...cnt.entries()].filter(([l]) => l !== k && l >= 0 && !parallele(k, l)).sort((a, b) => b[1] - a[1]).map(([l]) => l);
+        const voisins = [...cnt.entries()].filter(([l]) => l !== k && l >= 0).sort((a, b) => b[1] - a[1]).map(([l]) => l);
+        const autres = voisins.filter((l) => !parallele(k, l));
+        const paras = voisins.filter((l) => parallele(k, l));
         const dehors = cnt.has(-1);
+        const S = (paras.length ? stepOf(k, paras[0]) : null) || stepProche(k, v, 0.8);
+        const SS = autres.length >= 2 && parallele(autres[0], autres[1]) ? stepOf(autres[0], autres[1]) : null;
         let w = v;
-        if (autres.length >= 2) {
+        if (SS) {
+          // k longe le ressaut de deux autres pans : son arête y fait un petit
+          // décrochement, d'un bout de faîtage à l'autre.
+          const Pa = interLignes(ligne(k, autres[0]), SS), Pb = interLignes(ligne(k, autres[1]), SS);
+          if (proche(Pa, v, 1.5) && proche(Pb, v, 1.5)) {
+            const prev = simp[(vi - 1 + simp.length) % simp.length];
+            const dx = v[0] - prev[0], dy = v[1] - prev[1], L = Math.hypot(dx, dy) || 1;
+            const lab1 = at(Math.floor(((prev[0] + v[0]) / 2 + (dy / L) * 0.35) / cs), Math.floor(((prev[1] + v[1]) / 2 - (dx / L) * 0.35) / cs));
+            if (lab1 === autres[1]) { pousser(Pb); pousser(Pa); } else { pousser(Pa); pousser(Pb); }
+            continue;
+          }
+          const y = projLigne(v, ligne(k, autres[0])); if (proche(y, v, 1.5)) w = y;
+        } else if (S) {
+          if (autres.length >= 1) {
+            const x = interLignes(ligne(k, autres[0]), S);
+            if (proche(x, v, 1.5)) w = x; else { const y = projLigne(v, S); if (proche(y, v, 1.5)) w = y; }
+          } else if (dehors) {
+            const s = mur || projSeg(v), x = s && interLigneSeg(S, s), q = s && projSurSeg(v, s);
+            w = proche(x, v, 1.5) ? x : (q && proche(q, v, 1.0) ? q : v);
+          } else {
+            const x = projLigne(v, S); if (proche(x, v, 1.5)) w = x;
+          }
+        } else if (autres.length >= 2) {
           const x = inter3(k, autres[0], autres[1]);
           if (proche(x, v, 1.5)) w = x;
           else { const y = projLigne(v, ligne(k, autres[0])); if (proche(y, v, 1.5)) w = y; }
         } else if (autres.length === 1 && dehors) {
-          const s = projSeg(v), x = s && interLigneSeg(ligne(k, autres[0]), s);
-          w = proche(x, v, 1.5) ? x : (s && proche(s.q, v, 1.0) ? s.q : v);
+          // bout d'arête sur un mur : l'arête rencontre le mur que longe le pan
+          const s = mur || projSeg(v), x = s && interLigneSeg(ligne(k, autres[0]), s), q = s && projSurSeg(v, s);
+          w = proche(x, v, 1.5) ? x : (q && proche(q, v, 1.0) ? q : v);
         } else if (autres.length === 1) {
           const x = projLigne(v, ligne(k, autres[0]));
           if (proche(x, v, 1.5)) w = x;
         } else if (dehors) {
-          const s = projSeg(v); if (s && Math.hypot(s.q[0] - v[0], s.q[1] - v[1]) < 1.0) w = s.q;
+          // coin du bâtiment : rencontre des deux murs longés ; sinon, projection sur le mur
+          let x = null;
+          if (murAvant && murApres && (murAvant.a !== murApres.a || murAvant.b !== murApres.b)) x = interLignes(ligneSeg(murAvant), ligneSeg(murApres));
+          if (proche(x, v, 1.0)) w = x;
+          else { const s = mur || projSeg(v); if (s) { const q = projSurSeg(v, s); if (proche(q, v, 1.0)) w = q; } }
         }
-        w = caleTriple(k, w);
-        const last = pts[pts.length - 1];
-        if (!last || Math.hypot(w[0] - last[0], w[1] - last[1]) > 0.1) pts.push(w);
+        if (dehors) { const c = coinProche(w, 0.35); if (c) w = c; }
+        if (!S) w = caleTriple(k, w);
+        pousser(w);
       }
       while (pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 0.1) pts.pop();
+      // Les arêtes le long des murs suivent le contour régularisé : on y insère ses coins (décrochements)
+      for (let i = 0; i < pts.length; i++) {
+        const v = pts[i], w = pts[(i + 1) % pts.length];
+        if (!dehorsADroite(v, w)) continue;
+        const dx = w[0] - v[0], dy = w[1] - v[1], L = Math.hypot(dx, dy);
+        if (L < 1) continue;
+        const ins = [];
+        for (const c of coins) {
+          const t = ((c[0] - v[0]) * dx + (c[1] - v[1]) * dy) / (L * L);
+          if (t * L < 0.3 || (1 - t) * L < 0.3) continue;
+          const d = Math.abs(dx * (c[1] - v[1]) - dy * (c[0] - v[0])) / L;
+          if (d < 0.6) ins.push({ t, c });
+        }
+        ins.sort((p1, p2) => p1.t - p2.t);
+        const uniq = [];
+        for (const { c } of ins) if (!uniq.length || Math.hypot(c[0] - uniq[uniq.length - 1][0], c[1] - uniq[uniq.length - 1][1]) > 0.05) uniq.push([c[0], c[1]]);
+        pts.splice(i + 1, 0, ...uniq);
+        i += uniq.length;
+      }
       if (pts.length >= 3) faces2d.push({ pan: k, pts });
     });
 
     // Soudure : un coin partagé par plusieurs pans doit être UN seul point,
-    // sinon les pans et les murs laissent des fentes entre eux.
+    // sinon les pans et les murs laissent des fentes entre eux. Autour d'un
+    // ressaut, chaque pan garde son point : ils sont déjà calés sur sa ligne.
     {
       const V = [];
       faces2d.forEach((f, fi) => f.pts.forEach((q, vi) => V.push({ fi, vi, x: q[0], y: q[1], k: f.pan })));
@@ -1020,13 +1318,11 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
       for (const ids of grappes.values()) {
         if (ids.length < 2) continue;
         const ks = [...new Set(ids.map((i) => V[i].k))];
+        if (ks.some((a, i) => ks.some((b, j) => i !== j && parallele(a, b)))) continue;
+        if (ids.some((i) => surUnStep([V[i].x, V[i].y]))) continue; // déjà calé sur la ligne du ressaut
         let w = [ids.reduce((t, i) => t + V[i].x, 0) / ids.length, ids.reduce((t, i) => t + V[i].y, 0) / ids.length];
         const s = projSeg(w), auBord = s && Math.hypot(s.q[0] - w[0], s.q[1] - w[1]) < 0.35;
-        const ksNP = ks.filter((a, i) => ks.every((b, j) => i === j || !parallele(a, b)));
-        if (ksNP.length < ks.length) {
-          // ressaut entre pans parallèles : on garde la moyenne, calée sur le contour si on y est
-          if (auBord) w = s.q;
-        } else if (ks.length >= 3) {
+        if (ks.length >= 3) {
           const x = inter3(ks[0], ks[1], ks[2]);
           if (x && Math.hypot(x[0] - w[0], x[1] - w[1]) < 1.0) w = x;
         } else if (ks.length === 2) {
@@ -1034,6 +1330,8 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
           const x = auBord ? interLigneSeg(L, s) : projLigne(w, L);
           if (x && Math.hypot(x[0] - w[0], x[1] - w[1]) < 1.0) w = x;
         }
+        // une jonction qui arrive au mur près d'un coin du contour se termine dans ce coin
+        if (auBord) { const c = coinProche(w, 0.35); if (c) w = c; }
         for (const i of ids) faces2d[V[i].fi].pts[V[i].vi] = w;
       }
     }
@@ -1047,6 +1345,20 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         if (!last || Math.hypot(w[0] - last[0], w[1] - last[1]) > 0.05) pts.push(w);
       }
       while (pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 0.05) pts.pop();
+      // nettoyage : doublons, pointes (aller-retour sur une même ligne) et sommets alignés
+      for (let fini = false; !fini && pts.length > 3; ) {
+        fini = true;
+        for (let i = 0; i < pts.length && pts.length > 3; i++) {
+          const a = pts[(i - 1 + pts.length) % pts.length], b = pts[i], c = pts[(i + 1) % pts.length];
+          const ux = a[0] - b[0], uy = a[1] - b[1], vx = c[0] - b[0], vy = c[1] - b[1];
+          const lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
+          const pointe = lu < 0.05 || lv < 0.05 || (ux * vx + uy * vy) / (lu * lv) > Math.cos((5 * Math.PI) / 180);
+          const L = Math.hypot(c[0] - a[0], c[1] - a[1]) || 1e-9;
+          const d = Math.abs((c[0] - a[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (c[1] - a[1])) / L;
+          const entre = ((b[0] - a[0]) * (c[0] - a[0]) + (b[1] - a[1]) * (c[1] - a[1])) / (L * L);
+          if (pointe || (d < 0.05 && entre > 0 && entre < 1)) { pts.splice(i, 1); fini = false; break; }
+        }
+      }
       if (pts.length < 3) continue;
       const p3 = pts.map(([x, y]) => [x, y, zOf(k, x, y)]);
       faces.push({ pan: k, pts: p3 });
@@ -1057,7 +1369,10 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
         if (l2 < 0.3) continue;
         // de l'autre côté de l'arête (contour trigonométrique : l'extérieur est à droite)
         const mx = (a[0] + b[0]) / 2 + (dy / l2) * 0.35, my = (a[1] + b[1]) / 2 - (dx / l2) * 0.35;
-        const o = at(Math.floor(mx / cs), Math.floor(my / cs));
+        // le voisin de l'arête : la face qui contient le point sondé (la grille des mailles est trop grossière près des petits pans)
+        let o = -1;
+        for (const g of faces2d) if (g.pan !== k && inRing(mx, my, g.pts)) { o = g.pan; break; }
+        if (o < 0) o = at(Math.floor(mx / cs), Math.floor(my / cs));
         const long = Math.hypot(l2, b[2] - a[2]);
         const horizontale = Math.abs(b[2] - a[2]) / l2 < Math.tan((8 * Math.PI) / 180);
         let type, paire = null;
@@ -1067,6 +1382,9 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
           if (zOf(k, mx2, my2) < zOf(o, mx2, my2)) continue;
           type = horizontale ? 'egout' : 'rive';
           paire = Math.min(k, o) + '-' + Math.max(k, o);
+        } else if (o >= 0 && o !== k && surUnRessautDe(o, a, b)) {
+          // le petit décrochement de k le long du ressaut des autres : pas un linéaire
+          type = 'ressaut';
         } else if (o >= 0 && o !== k) {
           const ix = (a[0] + b[0]) / 2 - (dy / l2) * 0.5, iy = (a[1] + b[1]) / 2 + (dx / l2) * 0.5;
           const convexe = zOf(k, ix, iy) < zOf(o, ix, iy);
@@ -1131,9 +1449,46 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
     }
 
     const lineaires = { faitage: 0, arretier: 0, noue: 0, egout: 0, rive: 0 };
-    for (const e of aretes) lineaires[e.type] += e.long;
+    for (const e of aretes) if (e.type in lineaires) lineaires[e.type] += e.long;
     const aireFaces = faces.reduce((s, f) => s + ringArea(f.pts.map((q) => [q[0], q[1]])), 0);
-    return { faces, aretes, lineaires, couverture: aireFaces / Math.max(res.emprise, 1) };
+    return { faces, aretes, lineaires, couverture: aireFaces / Math.max(emprise, 1), contour: polys, axe, _steps: steps };
+    };
+
+    let M = construire();
+    // Seconde passe : égouts au même niveau, mesurés sur la maquette elle-même.
+    // Hauteur d'égout d'un pan = point bas de sa plus longue arête de mur (égout, sinon rive quasi horizontale).
+    const zEg = pans.map(() => NaN);
+    for (let k = 0; k < pans.length; k++) {
+      const murs = M.aretes.filter((e) => e.pan === k && !e.paire && (e.type === 'egout' || e.type === 'rive'));
+      const eg = murs.filter((e) => e.type === 'egout');
+      const cand = eg.length ? eg : murs.filter((e) => Math.abs(e.a[2] - e.b[2]) <= 0.5);
+      if (!cand.length) continue;
+      const ref = cand.reduce((u, v) => (v.long > u.long ? v : u));
+      zEg[k] = Math.min(ref.a[2], ref.b[2]);
+    }
+    const ordre2 = zEg.map((_, k) => k).filter((k) => Number.isFinite(zEg[k])).sort((i, j) => zEg[i] - zEg[j]);
+    const decal = pans.map(() => 0);
+    let grp = [];
+    const appliquer = () => {
+      if (grp.length >= 2) {
+        const m = grp.reduce((t, k) => t + zEg[k], 0) / grp.length;
+        for (const k of grp) decal[k] = m - zEg[k];
+      }
+      grp = [];
+    };
+    for (const k of ordre2) {
+      if (grp.length && zEg[k] - zEg[grp[grp.length - 1]] > 0.4) appliquer();
+      // deux pans parallèles séparés par un ressaut sont à des hauteurs différentes par construction
+      if (grp.some((g) => M._steps.has(Math.min(g, k) + '-' + Math.max(g, k)))) continue;
+      grp.push(k);
+    }
+    appliquer();
+    if (decal.some((d) => Math.abs(d) > 0.02)) {
+      decal.forEach((d, k) => { PL[k].c += d; });
+      M = construire();
+    }
+    delete M._steps;
+    return M;
   }
 
   const CARDINAUX = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
@@ -1202,7 +1557,7 @@ h2 { margin: 0; font: 600 20px var(--font-display); letter-spacing: .01em; }
   root.EV3 = {
     parseHeader, parseHierarchyPage, keyBoundsXY, loadCopcBox,
     toPolygons, inPolygons, polygonsArea, polygonsBounds,
-    fitPlane, planeZ, analyseRoof, recalerEmprise, panOutline, modeleToit, cardinal, median, quantile, DEFAULTS,
+    fitPlane, planeZ, analyseRoof, recalerEmprise, panOutline, modeleToit, regulariserContour, axeBatiment, cardinal, median, quantile, DEFAULTS,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 
@@ -1680,13 +2035,15 @@ function drawModel() {
     const a = W(...e.a), b = W(...e.b);
     const dir = new THREE.Vector3().subVectors(b, a), len = dir.length();
     if (len < 0.05) continue;
-    const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, len, 6), new THREE.MeshBasicMaterial({ color: LIGNES[e.type].coul }));
+    for (const p of [e.a, e.b]) sommets.set(p[0].toFixed(1) + ',' + p[1].toFixed(1), p);
+    const L = LIGNES[e.type];
+    if (!L) continue; // ressaut : pas un linéaire de couverture, rendu comme un mur
+    const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, len, 6), new THREE.MeshBasicMaterial({ color: L.coul }));
     tube.position.copy(a).addScaledVector(dir, 0.5);
     tube.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
     layers.pans.add(tube);
-    for (const p of [e.a, e.b]) sommets.set(p[0].toFixed(1) + ',' + p[1].toFixed(1), p);
     if (e.long >= 1.5 && (e.type !== 'egout' || e.long >= 4)) {
-      const t = cote(fmt(e.long, 2) + ' m', LIGNES[e.type].coul);
+      const t = cote(fmt(e.long, 2) + ' m', L.coul);
       const mid = W((e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2, (e.a[2] + e.b[2]) / 2 + 0.45);
       t.position.copy(mid);
       layers.pans.add(t);
@@ -1694,10 +2051,10 @@ function drawModel() {
   }
   const dot = new THREE.SphereGeometry(0.13, 10, 8), dotMat = new THREE.MeshBasicMaterial({ color: 0x2b59ff });
   for (const p of sommets.values()) { const s = new THREE.Mesh(dot, dotMat); s.position.copy(W(...p)); layers.pans.add(s); }
-  // Murs : sous chaque égout et chaque rive, du sol jusqu'au bord du toit (les pignons se forment seuls)
+  // Murs : sous chaque égout, rive et ressaut, du sol jusqu'au bord du toit (les pignons se forment seuls)
   const pos = [];
   for (const e of m.aretes) {
-    if (e.type !== 'egout' && e.type !== 'rive') continue;
+    if (e.type !== 'egout' && e.type !== 'rive' && e.type !== 'ressaut') continue;
     const a0 = W(e.a[0], e.a[1], res.zSol), b0 = W(e.b[0], e.b[1], res.zSol), a1 = W(...e.a), b1 = W(...e.b);
     pos.push(...a0.toArray(), ...b0.toArray(), ...b1.toArray(), ...a0.toArray(), ...b1.toArray(), ...a1.toArray());
   }
@@ -1729,7 +2086,8 @@ function drawOutlines() {
   clear(layers.outlines);
   for (const b of S.bats) {
     const sel = b === S.bat;
-    for (const rings of shifted(b.polys)) {
+    const polys = sel && S.model ? S.model.contour : shifted(b.polys);
+    for (const rings of polys) {
       const pts = rings[0].map(([x, y]) => W(x, y, S.origin[2] + 0.08));
       const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: sel ? 0xf2b705 : 0xffffff, transparent: !sel, opacity: sel ? 1 : 0.35 }));
       layers.outlines.add(line);
@@ -1817,6 +2175,7 @@ async function selectBuilding(bat, adresse, force = false) {
       const m = EV3.modeleToit(S.res, rec.geom);
       if (m.faces.length && m.couverture > 0.8 && m.couverture < 1.2) S.model = m;
     } catch (e) { console.warn('maquette', e); }
+    if (S.model && S.model.contour) S.polys = S.model.contour; // emprise redressée (murs d'équerre)
     colorPoints();
     if (S.model) drawModel(); else drawPans();
     drawOutlines(); applyToggles();
